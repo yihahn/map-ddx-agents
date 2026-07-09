@@ -1,4 +1,6 @@
-data_prep/mondo.json          # 원본 온톨로지, 용량 큼 → README에 다운로드 링크만 남김
+# 원본 온톨로지, 용량 큼 → README에 다운로드 링크만 남김
+data_prep/mondo.json          
 *.pt
 *.npy
-embeddings/                # BioLORD 임베딩 캐시(추후 생성될 파일), 팀원마다 로컬 재생성
+# BioLORD 임베딩 캐시(추후 생성될 파일), 팀원마다 로컬 재생성 
+embeddings/                
