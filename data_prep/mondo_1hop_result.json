@@ -1,0 +1,126 @@
+{
+  "target_id": "MONDO:0005002",
+  "label": "chronic obstructive pulmonary disease",
+  "synonyms": [
+    {
+      "pred": "hasExactSynonym",
+      "value": "COLD"
+    },
+    {
+      "pred": "hasExactSynonym",
+      "value": "COPD"
+    },
+    {
+      "pred": "hasExactSynonym",
+      "value": "COPD, chronic obstructive pulmonary disease"
+    },
+    {
+      "pred": "hasExactSynonym",
+      "value": "chronic obstructive airways disease"
+    },
+    {
+      "pred": "hasExactSynonym",
+      "value": "chronic obstructive lung disease"
+    },
+    {
+      "pred": "hasExactSynonym",
+      "value": "chronic obstructive pulmonary disease (COPD)"
+    },
+    {
+      "pred": "hasExactSynonym",
+      "value": "chronic obstructive pulmonary disease, (COPD)"
+    },
+    {
+      "pred": "hasExactSynonym",
+      "value": "cold"
+    },
+    {
+      "pred": "hasExactSynonym",
+      "value": "cold (chronic obstructive lung disease)"
+    },
+    {
+      "pred": "hasExactSynonym",
+      "value": "disease (COPD), chronic obstructive"
+    },
+    {
+      "pred": "hasExactSynonym",
+      "value": "obstructive lung disease, chronic"
+    },
+    {
+      "pred": "hasExactSynonym",
+      "value": "obstructive pulmonary disease (COPD), chronic"
+    },
+    {
+      "pred": "hasExactSynonym",
+      "value": "pulmonary disease (COPD), chronic obstructive"
+    }
+  ],
+  "max_hops_searched": 1,
+  "hop_ordered_relations": {
+    "1": [
+      {
+        "id": "MONDO:0004822",
+        "label": "bronchiectasis",
+        "direction_from_parent_node": "child",
+        "predicate": "is_a",
+        "from_node_id": "MONDO:0005002"
+      },
+      {
+        "id": "MONDO:0004849",
+        "label": "pulmonary emphysema",
+        "direction_from_parent_node": "child",
+        "predicate": "is_a",
+        "from_node_id": "MONDO:0005002"
+      },
+      {
+        "id": "MONDO:0002267",
+        "label": "obstructive lung disease",
+        "direction_from_parent_node": "parent",
+        "predicate": "is_a",
+        "from_node_id": "MONDO:0005002"
+      },
+      {
+        "id": "MONDO:0002567",
+        "label": "tracheal disorder",
+        "direction_from_parent_node": "parent",
+        "predicate": "is_a",
+        "from_node_id": "MONDO:0005002"
+      },
+      {
+        "id": "PATO:0001863",
+        "label": "chronic",
+        "direction_from_parent_node": "parent",
+        "predicate": "http://purl.obolibrary.org/obo/RO_0000053",
+        "from_node_id": "MONDO:0005002"
+      },
+      {
+        "id": "MONDO:0005607",
+        "label": "chronic bronchitis",
+        "direction_from_parent_node": "child",
+        "predicate": "is_a",
+        "from_node_id": "MONDO:0005002"
+      },
+      {
+        "id": "MONDO:0011490",
+        "label": "diffuse panbronchiolitis",
+        "direction_from_parent_node": "child",
+        "predicate": "is_a",
+        "from_node_id": "MONDO:0005002"
+      },
+      {
+        "id": "MONDO:0011751",
+        "label": "COPD, severe early onset",
+        "direction_from_parent_node": "child",
+        "predicate": "is_a",
+        "from_node_id": "MONDO:0005002"
+      },
+      {
+        "id": "MONDO:0100167",
+        "label": "pulmonary disease, chronic obstructive, susceptibility to",
+        "direction_from_parent_node": "child",
+        "predicate": "http://purl.obolibrary.org/obo/mondo#predisposes_towards",
+        "from_node_id": "MONDO:0005002"
+      }
+    ]
+  }
+}
