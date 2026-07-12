@@ -214,7 +214,7 @@ if __name__ == "__main__":
 
      # 원하는 hop 수(예: 3-hop)를 넣어 
     start_node_id = "MONDO:0005002"
-    json_file_path = "mondo.json"
+    json_file_path = "../data_prep/mondo.json"
     hops = 1 
     
     result = extract_mondo_nhop_relations(
