@@ -28,7 +28,7 @@ Vignette 또는 Problem list를 보고 감별진단 목록과 각 감별진단�
 ```python
 from deepagents import create_deep_agent
 from pydantic import BaseModel
-from schemas import DDxItem, Evidence  # 공통 스키마
+from schema import DDxItem, Evidence  # 공통 스키마
 
 SPECIALIST_MODEL = "gemma-4"      # deterministic 버전과 동일 (비교실험 변수 통제)
 ORCHESTRATOR_MODEL = "gemma-4"

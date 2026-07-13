@@ -44,7 +44,7 @@
 from typing import Annotated, Literal, Optional
 from pydantic import BaseModel
 import operator
-from schemas import DDxItem, Evidence, WorkupGap
+from schema import DDxItem, Evidence, WorkupGap
 
 class Criterion(BaseModel):
     text: str            # 진단기준 항목 원문

@@ -42,7 +42,7 @@ START → extract_mesh_terms → (Send × 10, 병렬) → search_case_reports �
 from typing import Annotated
 from pydantic import BaseModel
 import operator
-from schemas import DDxItem, Evidence
+from schema import DDxItem, Evidence
 from langgraph.types import Send
 
 class MeshTermList(BaseModel):

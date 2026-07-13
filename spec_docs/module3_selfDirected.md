@@ -39,7 +39,7 @@ Module1 결과와 Module2 결과를 merge_prelim_ddx로 병합해 Top-N Prelim. 
 ```python
 from deepagents import create_deep_agent
 from pydantic import BaseModel
-from schemas import DDxItem, Evidence, WorkupGap
+from schema import DDxItem, Evidence, WorkupGap
 
 class Module3Output(BaseModel):
     ddx_list: list[DDxItem]

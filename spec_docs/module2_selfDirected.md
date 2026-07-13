@@ -37,7 +37,7 @@ Module 2 JSON과 같은 형태로 출력하라.
 ```python
 from deepagents import create_deep_agent
 from pydantic import BaseModel
-from schemas import DDxItem, Evidence  # 공통 스키마
+from schema import DDxItem, Evidence  # 공통 스키마
 
 ORCHESTRATOR_MODEL = "gemma-4"   # deterministic 버전과 동일 (비교실험 변수 통제)
 

@@ -43,7 +43,7 @@ START → recruit_specialists → (Send × 5, 병렬) → specialist_ddx → agg
 from typing import Annotated
 from pydantic import BaseModel
 import operator
-from schemas import DDxItem, Evidence  # 공통 스키마
+from schema import DDxItem, Evidence  # 공통 스키마
 from langgraph.types import Send
 
 class RecruitedDepartments(BaseModel):
