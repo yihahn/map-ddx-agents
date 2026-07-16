@@ -1,0 +1,75 @@
+{
+  "_meta": {
+    "note": "합성 테스트 데이터 — 실제 PubMed 검색/LLM 실행 결과가 아니라, module2_deterministic.md 파이프라인(extract_mesh_terms → search_case_reports ×N → aggregate)의 출력 스키마를 검증하기 위해 수작업 작성함. count 값은 시뮬레이션용 placeholder. schema.py(업로드본) 기준.",
+    "patient_id": "PT10",
+    "source_files": ["reference_standard/PT10_summary.md"],
+    "sections_used": ["patient", "chief_complaint", "past_history", "baseline", "key_events(2024-03-02~2024-03-04)"],
+    "sections_excluded": ["key_events(2024-03-05 이후)", "ruled_out", "최종 진단"],
+    "key_events_cutoff": {
+      "cutoff_date": "2024-03-05",
+      "reason": "03/05 이후 key_event(enterovirus RT-PCR 양성, Echovirus 11 genotyping)를 제외해야 blind DDx 발굴이 성립함. MeSH term도 'Enterovirus'/'Echovirus'를 직접 쓰지 않고 03/04까지의 임상 패턴(원내 클러스터, 심근염 소견, viral etiology 의심)에서만 추출함 — 병원체명은 검색된 case report 제목에서 도출되는 구조."
+    }
+  },
+  "mesh_terms": [
+    "Disease Outbreaks", "Myocarditis", "Neonatal Sepsis", "Cross Infection",
+    "Multiple Organ Failure", "Shock, Cardiogenic", "Nursery, Hospital",
+    "Heart Failure", "Fever", "Sepsis"
+  ],
+  "search_log": [
+    {"term": "Disease Outbreaks", "query": "(Disease Outbreaks) AND \"case reports\"[Publication Type]", "count": 1980, "note": "count>500 → 연관 term 'Myocarditis' 추가 재검색"},
+    {"term": "Myocarditis", "query": "(Myocarditis) AND \"case reports\"[Publication Type]", "count": 3840, "note": "count>500 → 연관 term 'Disease Outbreaks' 추가 재검색"},
+    {"term": "Disease Outbreaks + Myocarditis", "query": "(Disease Outbreaks) AND (Myocarditis) AND \"case reports\"[Publication Type]", "count": 47},
+    {"term": "Neonatal Sepsis", "query": "(Neonatal Sepsis) AND \"case reports\"[Publication Type]", "count": 780, "note": "count>500 → 연관 term 'Heart Failure' 추가 재검색"},
+    {"term": "Neonatal Sepsis + Heart Failure", "query": "(Neonatal Sepsis) AND (Heart Failure) AND \"case reports\"[Publication Type]", "count": 39},
+    {"term": "Cross Infection", "query": "(Cross Infection) AND \"case reports\"[Publication Type]", "count": 1120, "note": "count>500 → 연관 term 'Multiple Organ Failure' 추가 재검색"},
+    {"term": "Cross Infection + Multiple Organ Failure", "query": "(Cross Infection) AND (Multiple Organ Failure) AND \"case reports\"[Publication Type]", "count": 62},
+    {"term": "Shock, Cardiogenic", "query": "(Shock, Cardiogenic) AND \"case reports\"[Publication Type]", "count": 990, "note": "count>500 → 연관 term 추가 재검색 후에도 신규 진단 없음"},
+    {"term": "Nursery, Hospital", "query": "(Nursery, Hospital) AND \"case reports\"[Publication Type]", "count": 41},
+    {"term": "Nursery, Hospital + Disease Outbreaks", "query": "(Nursery, Hospital) AND (Disease Outbreaks) AND \"case reports\"[Publication Type]", "count": 28},
+    {"term": "Fever", "query": "(Fever) AND \"case reports\"[Publication Type]", "count": 2410, "note": "count>500 → 연관 term 추가 재검색 후에도 신규 진단 없음"},
+    {"term": "Sepsis", "query": "(Sepsis) AND \"case reports\"[Publication Type]", "count": 5230, "note": "count>500 → 연관 term 추가 재검색 후에도 신규 진단 없음"}
+  ],
+  "final_ddx_list": [
+    {
+      "diagnosis_name": "Nosocomial neonatal enteroviral infection",
+      "source_detail": "(Disease Outbreaks) AND (Myocarditis) AND \"case reports\"[Publication Type]",
+      "status": "pending",
+      "evidence": [
+        {"content": "Disease Outbreaks + Myocarditis — 검색된 case report 제목 다수가 신생아 집단발생성 심근염을 enterovirus 감염으로 보고", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Neonatal parechovirus infection",
+      "source_detail": "(Cross Infection) AND (Multiple Organ Failure) AND \"case reports\"[Publication Type]",
+      "status": "pending",
+      "evidence": [
+        {"content": "Cross Infection + Multiple Organ Failure — 원내 클러스터+다발성 장기부전 패턴의 대안 병원체로 parechovirus 언급된 case report 존재", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Viral myocarditis",
+      "source_detail": "(Myocarditis) AND \"case reports\"[Publication Type]",
+      "status": "pending",
+      "evidence": [
+        {"content": "Myocarditis", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Nosocomial adenovirus outbreak",
+      "source_detail": "(Nursery, Hospital) AND (Disease Outbreaks) AND \"case reports\"[Publication Type]",
+      "status": "pending",
+      "evidence": [
+        {"content": "Nursery, Hospital + Disease Outbreaks — 신생아실 집단발생 사례 중 adenovirus 보고 case report 존재", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Culture-negative neonatal septic cardiomyopathy",
+      "source_detail": "(Neonatal Sepsis) AND (Heart Failure) AND \"case reports\"[Publication Type]",
+      "status": "pending",
+      "evidence": [
+        {"content": "Neonatal Sepsis + Heart Failure", "supports": true, "date": null, "source_doc": null}
+      ]
+    }
+  ],
+  "output_path": "output_json/module2_new_ddx_PT10.json"
+}

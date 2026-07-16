@@ -1,0 +1,133 @@
+{
+  "_meta": {
+    "note": "합성 테스트 데이터 — 실제 gemma-4 LLM 실행 결과가 아니라, module1_deterministic.md 파이프라인(recruit_specialists → specialist_ddx ×5 → aggregate_union)의 출력 스키마를 검증하기 위해 PT09 reference_standard를 근거로 수작업 작성함. schema.py(업로드본) 기준.",
+    "patient_id": "PT09",
+    "source_files": ["reference_standard/PT09_summary.md"],
+    "sections_used": ["patient", "chief_complaint", "past_history", "baseline", "key_events(2024-01-15~2024-01-18)"],
+    "sections_excluded": ["key_events(2024-01-19 이후)", "ruled_out", "최종 진단"],
+    "key_events_cutoff": {
+      "cutoff_date": "2024-01-19",
+      "reason": "01/19 key_event에 'Pill ID: Colchicine 0.6mg 확인 → 약국 조제 오류 확인 → 확정 진단'이 서술되어 있어 이 시점부터 최종 진단이 노출됨. Module1/2는 진단이 아직 확정되지 않은 시점의 blind DDx 생성을 시뮬레이션하므로 01/19 및 이후 key_event, 그리고 ruled_out/최종 진단 섹션 전체는 입력에서 제외함.",
+      "included_events": ["2024-01-15", "2024-01-16", "2024-01-17", "2024-01-18"],
+      "excluded_events": ["2024-01-19", "2024-01-20~21", "2024-01-22", "2024-01-23~24"]
+    }
+  },
+  "vignette_ref": "22세 M, 심한 복통+구토+설사+전신 발진+저혈압으로 입원. 01/15 패혈증 쇼크 치료 시작 → 01/16 불응성 쇼크+심근기능저하 → 01/17 AKI(ATN) 진행 → 01/18 백혈구 급격 감소(마약전 오인 복용력만 있음, 약물명 미상) 및 'cytotoxic drug/toxin 강력 시사' 소견까지만 포함 (원인 물질 미확정 상태)",
+  "departments": ["응급의학과", "소화기내과", "순환기내과", "혈액종양내과", "임상독성학과"],
+  "final_ddx_list": [
+    {
+      "diagnosis_name": "Refractory septic shock",
+      "source_detail": "응급의학과",
+      "status": "pending",
+      "evidence": [
+        {"content": "01/16 Refractory shock despite NE+pip-tazo+vancomycin — 초기 경험적 항생제 치료에 반응 없는 쇼크 양상", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Fulminant myocarditis",
+      "source_detail": "응급의학과, 순환기내과",
+      "status": "pending",
+      "evidence": [
+        {"content": "01/16 Echo EF 35-40% global hypokinesia, Troponin I 0.84↑, BNP 1,240↑ — 심근 기능 저하 동반", "supports": true, "date": null, "source_doc": null},
+        {"content": "Troponin I 0.84↑ + BNP 1,240↑ + global hypokinesia — 심근염에 의한 심기능 저하 가능", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Toxin-mediated multi-organ shock",
+      "source_detail": "응급의학과",
+      "status": "pending",
+      "evidence": [
+        {"content": "01/18 GI toxicity+shock+cardiomyopathy+AKI+sudden marrow suppression 병발 — 단일 세균 감염보다 전신 독성 기전 시사", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Acute gastroenteritis with septic complication",
+      "source_detail": "소화기내과",
+      "status": "pending",
+      "evidence": [
+        {"content": "심한 복통+구토+설사 — 초기 급성 위장관염 양상", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Toxic/drug-induced enterocolitis",
+      "source_detail": "소화기내과",
+      "status": "pending",
+      "evidence": [
+        {"content": "수일 전부터 '감기약'으로 알고 알약 복용 + CT: diffuse bowel wall edema — 약물 유발 장염 가능성", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Ischemic bowel injury secondary to shock",
+      "source_detail": "소화기내과",
+      "status": "pending",
+      "evidence": [
+        {"content": "01/15 지속된 저혈압/쇼크 + CT diffuse bowel wall edema, no surgical source — 저관류에 의한 장허혈 가능성", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Toxic/stress cardiomyopathy",
+      "source_detail": "순환기내과",
+      "status": "pending",
+      "evidence": [
+        {"content": "01/16 Echo EF 35-40% global hypokinesia (no RWMA) — 국소 관류장애 아닌 미만성 심근 기능 저하", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Sepsis-induced cardiomyopathy",
+      "source_detail": "순환기내과",
+      "status": "pending",
+      "evidence": [
+        {"content": "지속된 패혈성 쇼크 경과 중 EF 저하 — 패혈증 관련 심근병증 가능", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Drug/toxin-induced bone marrow suppression",
+      "source_detail": "혈액종양내과",
+      "status": "pending",
+      "evidence": [
+        {"content": "01/18 WBC 14,800→1,800/µL(2일 내 급감), ANC 820 — 약물/독소에 의한 급성 골수 억제 강력 시사", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Sepsis-associated consumptive leukopenia",
+      "source_detail": "혈액종양내과",
+      "status": "pending",
+      "evidence": [
+        {"content": "중증 패혈성 쇼크 경과 중 백혈구 급감 — 중증 감염에 의한 소모성 백혈구감소 가능성", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Post-infectious/viral-associated transient neutropenia",
+      "source_detail": "혈액종양내과",
+      "status": "pending",
+      "evidence": [
+        {"content": "급성 발열성 질환 경과 중 백혈구 감소 — 감염 연관 일과성 호중구감소 가능성", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Colchicine poisoning",
+      "source_detail": "임상독성학과",
+      "status": "pending",
+      "evidence": [
+        {"content": "01/18 GI 독성+쇼크+심근병증+AKI+급성 골수 억제의 5징후 조합 — colchicine 중독의 고전적 pentad와 매우 유사하나 섭취 물질 미상", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Heavy metal (arsenic) poisoning",
+      "source_detail": "임상독성학과",
+      "status": "pending",
+      "evidence": [
+        {"content": "심한 복통+구토+설사+저혈압 + 다발성 장기 침범 — 비소 중독 급성기 소견과 유사", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Amatoxin (mushroom) poisoning",
+      "source_detail": "임상독성학과",
+      "status": "pending",
+      "evidence": [
+        {"content": "심한 GI 증상+다발 장기 침범 — 독버섯 중독 초기~중기 패턴과 유사", "supports": true, "date": null, "source_doc": null}
+      ]
+    }
+  ],
+  "output_path": "output_json/module1_prelim_ddx_PT09.json"
+}

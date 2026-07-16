@@ -1,0 +1,75 @@
+{
+  "_meta": {
+    "note": "합성 테스트 데이터 — 실제 PubMed 검색/LLM 실행 결과가 아니라, module2_deterministic.md 파이프라인(extract_mesh_terms → search_case_reports ×N → aggregate)의 출력 스키마를 검증하기 위해 수작업 작성함. count 값은 시뮬레이션용 placeholder. schema.py(업로드본) 기준.",
+    "patient_id": "PT09",
+    "source_files": ["reference_standard/PT09_summary.md"],
+    "sections_used": ["patient", "chief_complaint", "past_history", "baseline", "key_events(2024-01-15~2024-01-18)"],
+    "sections_excluded": ["key_events(2024-01-19 이후)", "ruled_out", "최종 진단"],
+    "key_events_cutoff": {
+      "cutoff_date": "2024-01-19",
+      "reason": "01/19 이후 key_event(Pill ID: Colchicine 확인, 조제 오류 확인, 확정 진단)를 제외해야 blind DDx 발굴이 성립함. MeSH term도 '약물명(Colchicine)'을 직접 쓰지 않고 01/18까지의 증상/소견(중독, 골수억제, 심근병증 등)에서만 추출함 — 진단명은 검색된 case report 제목에서 도출되는 구조."
+    }
+  },
+  "mesh_terms": [
+    "Poisoning", "Bone Marrow Failure Disorders", "Shock", "Acute Kidney Injury",
+    "Cardiomyopathies", "Gastroenteritis", "Multiple Organ Failure", "Exanthema",
+    "Neutropenia", "Hypotension"
+  ],
+  "search_log": [
+    {"term": "Poisoning", "query": "(Poisoning) AND \"case reports\"[Publication Type]", "count": 6420, "note": "count>500 → 연관 term 'Bone Marrow Failure Disorders' 추가 재검색"},
+    {"term": "Bone Marrow Failure Disorders", "query": "(Bone Marrow Failure Disorders) AND \"case reports\"[Publication Type]", "count": 64},
+    {"term": "Poisoning + Bone Marrow Failure Disorders", "query": "(Poisoning) AND (Bone Marrow Failure Disorders) AND \"case reports\"[Publication Type]", "count": 41},
+    {"term": "Shock", "query": "(Shock) AND \"case reports\"[Publication Type]", "count": 8120, "note": "count>500 → 연관 term 'Acute Kidney Injury' 추가 재검색"},
+    {"term": "Acute Kidney Injury", "query": "(Acute Kidney Injury) AND \"case reports\"[Publication Type]", "count": 890, "note": "count>500 → 연관 term 'Cardiomyopathies' 추가 재검색"},
+    {"term": "Acute Kidney Injury + Cardiomyopathies", "query": "(Acute Kidney Injury) AND (Cardiomyopathies) AND \"case reports\"[Publication Type]", "count": 58},
+    {"term": "Gastroenteritis", "query": "(Gastroenteritis) AND \"case reports\"[Publication Type]", "count": 512, "note": "count>500 → 연관 term 추가 재검색 후에도 신규 진단 없음"},
+    {"term": "Multiple Organ Failure", "query": "(Multiple Organ Failure) AND \"case reports\"[Publication Type]", "count": 288},
+    {"term": "Poisoning + Multiple Organ Failure", "query": "(Poisoning) AND (Multiple Organ Failure) AND \"case reports\"[Publication Type]", "count": 73},
+    {"term": "Exanthema", "query": "(Exanthema) AND \"case reports\"[Publication Type]", "count": 233},
+    {"term": "Neutropenia", "query": "(Neutropenia) AND \"case reports\"[Publication Type]", "count": 340},
+    {"term": "Hypotension", "query": "(Hypotension) AND \"case reports\"[Publication Type]", "count": 1290, "note": "count>500 → 연관 term 추가 재검색 후에도 신규 진단 없음"}
+  ],
+  "final_ddx_list": [
+    {
+      "diagnosis_name": "Colchicine poisoning",
+      "source_detail": "(Poisoning) AND (Bone Marrow Failure Disorders) AND \"case reports\"[Publication Type]",
+      "status": "pending",
+      "evidence": [
+        {"content": "Poisoning + Bone Marrow Failure Disorders — 검색된 case report 제목 다수가 colchicine 중독을 골수억제 원인으로 보고", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Toxin-induced pancytopenia with cardiomyopathy",
+      "source_detail": "(Acute Kidney Injury) AND (Cardiomyopathies) AND \"case reports\"[Publication Type]",
+      "status": "pending",
+      "evidence": [
+        {"content": "Acute Kidney Injury + Cardiomyopathies", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Occult heavy metal poisoning (arsenic/thallium)",
+      "source_detail": "(Poisoning) AND (Multiple Organ Failure) AND \"case reports\"[Publication Type]",
+      "status": "pending",
+      "evidence": [
+        {"content": "Poisoning + Multiple Organ Failure", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Toxic epidermal-like drug eruption",
+      "source_detail": "(Exanthema) AND \"case reports\"[Publication Type]",
+      "status": "pending",
+      "evidence": [
+        {"content": "Exanthema", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Toxin-induced acute tubular necrosis with cardiomyopathy",
+      "source_detail": "(Acute Kidney Injury) AND (Cardiomyopathies) AND \"case reports\"[Publication Type]",
+      "status": "pending",
+      "evidence": [
+        {"content": "Acute Kidney Injury + Cardiomyopathies", "supports": true, "date": null, "source_doc": null}
+      ]
+    }
+  ],
+  "output_path": "output_json/module2_new_ddx_PT09.json"
+}

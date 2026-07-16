@@ -1,0 +1,160 @@
+{
+  "_meta": {
+    "note": "합성 테스트 데이터 — module3_deterministic.md의 merge_prelim_ddx(state.prelim_ddx_list) 출력 형식을 검증하기 위해 module1_prelim_ddx_PT10.json + module2_new_ddx_PT10.json을 diagnosis_name 완전일치로 병합함. 이 파일이 Module3의 route_to_verification(Send fan-out) 시작점. schema.py(업로드본) 기준.",
+    "patient_id": "PT10",
+    "merged_from": ["output_json/module1_prelim_ddx_PT10.json", "output_json/module2_new_ddx_PT10.json"],
+    "merge_stats": {"module1_count": 14, "module2_count": 5, "dedup_matches": 1, "prelim_ddx_count": 18},
+    "key_events_cutoff": {
+      "cutoff_date": "2024-03-05",
+      "reason": "module1/module2 입력 모두 03/05(병원체 확정 이벤트) 이전 key_events까지만 사용 — 03/05 이후 및 ruled_out/최종 진단 섹션은 병합 대상 자료 생성에 사용하지 않음. Module3는 이 상태에서 EMR 전체(03/05 이후 포함)를 조회하며 각 진단을 검증하는 단계."
+    }
+  },
+  "prelim_ddx_list": [
+    {
+      "diagnosis_name": "Refractory neonatal septic shock",
+      "source_detail": "신생아중환자의학과",
+      "status": "pending",
+      "evidence": [
+        {"content": "03/02 NE 시작, 03/04 BC D4 no growth에도 쇼크 지속 — 배양 음성 불응성 쇼크", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Nosocomial neonatal outbreak-associated illness",
+      "source_detail": "신생아중환자의학과",
+      "status": "pending",
+      "evidence": [
+        {"content": "03/02 신생아 #2, #3 동일 분만구역 fever+shock — 동일 병동 클러스터 발생", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Inborn error of metabolism",
+      "source_detail": "신생아중환자의학과",
+      "status": "pending",
+      "evidence": [
+        {"content": "Poor feeding+vomiting+lethargy+seizure-like activity — 대사질환의 전형적 신생아 발현 패턴", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Enteroviral sepsis",
+      "source_detail": "소아감염내과",
+      "status": "pending",
+      "evidence": [
+        {"content": "03/03 CSF HSV PCR(-) → Acyclovir 중단, 03/04 BC no growth → viral etiology 의심 — 신생아 클러스터+심근침범 패턴은 enterovirus 감염에서 전형적", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Group B Streptococcus sepsis",
+      "source_detail": "소아감염내과",
+      "status": "pending",
+      "evidence": [
+        {"content": "생후 42시간 발열 — 조기 발현 GBS 패혈증의 전형적 발생 시기 (혈액배양 결과 대기 중)", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Culture-negative bacterial sepsis",
+      "source_detail": "소아감염내과",
+      "status": "pending",
+      "evidence": [
+        {"content": "03/04 BC D4 no growth이나 항생제 강화(Vancomycin+Cefepime) 상태 — 조기 항생제 투여로 인한 배양 음전 가능성 배제 못함", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Hypoxic-ischemic encephalopathy",
+      "source_detail": "소아신경과",
+      "status": "pending",
+      "evidence": [
+        {"content": "Seizure-like activity + lethargy — 신생아 뇌병증의 전형적 증상", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Neonatal meningitis",
+      "source_detail": "소아신경과",
+      "status": "pending",
+      "evidence": [
+        {"content": "Fever+lethargy+seizure-like activity + CSF WBC 22/protein 98(경도 상승) — 신생아 수막염 감별 필요", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Sepsis-associated encephalopathy",
+      "source_detail": "소아신경과",
+      "status": "pending",
+      "evidence": [
+        {"content": "03/03 MV 필요할 정도의 중증 쇼크 경과 — 전신 상태 악화에 의한 이차성 뇌병증 가능", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Viral myocarditis",
+      "source_detail": "Module1: 소아심장과, 임상미생물학과 | Module2: (Myocarditis) AND \"case reports\"[Publication Type]",
+      "status": "pending",
+      "evidence": [
+        {"content": "03/03 Echo EF 42% global hypokinesia + CXR cardiomegaly/pulmonary edema — 심근 기능 저하 진행 중", "supports": true, "date": null, "source_doc": null},
+        {"content": "03/03 Echo EF 42% global hypokinesia — 클러스터 원인 병원체의 심근 침범 가능성", "supports": true, "date": null, "source_doc": null},
+        {"content": "Myocarditis", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Congenital heart disease with heart failure",
+      "source_detail": "소아심장과",
+      "status": "pending",
+      "evidence": [
+        {"content": "HR 184(지속 빈맥) — 신생아 선천성 심장병에 의한 심부전 감별 필요", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Septic cardiomyopathy",
+      "source_detail": "소아심장과",
+      "status": "pending",
+      "evidence": [
+        {"content": "03/02 NE 시작 이후 진행성 심근기능저하 — 패혈증 연관 심근병증 가능", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Nosocomial viral outbreak (원인 병원체 미확정)",
+      "source_detail": "임상미생물학과",
+      "status": "pending",
+      "evidence": [
+        {"content": "03/02 신생아 #2, #3 동일 분만구역 fever+shock 동시발병, 03/04 BC no growth → viral etiology 의심 — 원내 바이러스 클러스터 시사, 병원체 미확정", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Nosocomial multidrug-resistant bacterial outbreak",
+      "source_detail": "임상미생물학과",
+      "status": "pending",
+      "evidence": [
+        {"content": "03/02 동시다발 신생아 발병 + 03/04 BC no growth에도 항생제 강화 지속 — 배양 음전 원내 세균 클러스터 가능성 배제 못함", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Nosocomial neonatal enteroviral infection",
+      "source_detail": "(Disease Outbreaks) AND (Myocarditis) AND \"case reports\"[Publication Type]",
+      "status": "pending",
+      "evidence": [
+        {"content": "Disease Outbreaks + Myocarditis — 검색된 case report 제목 다수가 신생아 집단발생성 심근염을 enterovirus 감염으로 보고", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Neonatal parechovirus infection",
+      "source_detail": "(Cross Infection) AND (Multiple Organ Failure) AND \"case reports\"[Publication Type]",
+      "status": "pending",
+      "evidence": [
+        {"content": "Cross Infection + Multiple Organ Failure — 원내 클러스터+다발성 장기부전 패턴의 대안 병원체로 parechovirus 언급된 case report 존재", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Nosocomial adenovirus outbreak",
+      "source_detail": "(Nursery, Hospital) AND (Disease Outbreaks) AND \"case reports\"[Publication Type]",
+      "status": "pending",
+      "evidence": [
+        {"content": "Nursery, Hospital + Disease Outbreaks — 신생아실 집단발생 사례 중 adenovirus 보고 case report 존재", "supports": true, "date": null, "source_doc": null}
+      ]
+    },
+    {
+      "diagnosis_name": "Culture-negative neonatal septic cardiomyopathy",
+      "source_detail": "(Neonatal Sepsis) AND (Heart Failure) AND \"case reports\"[Publication Type]",
+      "status": "pending",
+      "evidence": [
+        {"content": "Neonatal Sepsis + Heart Failure", "supports": true, "date": null, "source_doc": null}
+      ]
+    }
+  ]
+}
