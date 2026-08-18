@@ -4,3 +4,7 @@ data_prep/mondo.json
 *.npy
 # BioLORD 임베딩 캐시(추후 생성될 파일), 팀원마다 로컬 재생성 
 embeddings/                
+# Langfuse Key and URL
+.env
+# uv-managed virtual environment
+.venv/
