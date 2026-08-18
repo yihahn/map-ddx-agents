@@ -12,3 +12,5 @@ embeddings/
 pending_diag/
 # Python bytecode cache
 __pycache__/
+# Module 2 run outputs — derived from real patient data, kept locally only
+modules/module2_deterministic/output/
