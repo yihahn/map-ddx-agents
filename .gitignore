@@ -8,3 +8,5 @@ embeddings/
 .env
 # uv-managed virtual environment
 .venv/
+# Sensitive patient data — kept locally only, never tracked in git
+pending_diag/
