@@ -10,3 +10,5 @@ embeddings/
 .venv/
 # Sensitive patient data — kept locally only, never tracked in git
 pending_diag/
+# Python bytecode cache
+__pycache__/
