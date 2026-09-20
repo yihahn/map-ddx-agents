@@ -12,5 +12,12 @@ embeddings/
 pending_diag/
 # Python bytecode cache
 __pycache__/
-# Module 2 run outputs — derived from real patient data, kept locally only
+# Module 1/2/3 run outputs — derived from real patient data, kept locally only
+modules/module1_deterministic/output/
 modules/module2_deterministic/output/
+modules/module3_deterministic/output/
+modules/module3_deterministic/exp_output/
+modules/module3_deterministic/output_keyword_matching/
+
+# 환자 데이터 기반 리포트 — 로컬 보관 전용
+reports/

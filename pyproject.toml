@@ -3,6 +3,8 @@ name = "map-ddx-agents"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+    "beautifulsoup4>=4.15.0",
+    "ddgs>=9.15.0",
     "deepagents>=0.7.6",
     "git-filter-repo>=2.47.0",
     "langchain-openai>=1.5.1",
