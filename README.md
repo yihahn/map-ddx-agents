@@ -12,4 +12,4 @@ Module 1~3을 LangGraph+deepagents 기반 deterministic/self-directed 두 방식
 `embeddings/mondo_biolord.npy`에 캐시하므로 수 분이 걸리며, 이후 실행은 캐시를 로딩한다.
 
 #### How to run module 2 workflow 
-`uv run python -m modules.module2_deterministic.run --patient PT09` or `./run_module2.sh PT09`
+`uv run python -m modules.module2_deterministic.run PT09` or `./run_module2.sh PT09`

@@ -27,3 +27,5 @@ modules/module3_deterministic/output_keyword_matching/
 
 # 환자 데이터 기반 리포트 — 로컬 보관 전용
 reports/
+# Batch run logs — patient DDx names and verdicts, local only
+batch_logs/
