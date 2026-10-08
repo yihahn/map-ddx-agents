@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from schema import DDxItem, Evidence
 
-from .llm import get_llm
+from .llm import get_structured_llm
 from .normalize import dedup_ddx_items
 from .pubmed import esearch_count, esearch_pmids, esummary
 
@@ -61,7 +61,7 @@ class Module2State(dict):
 
 def extract_mesh_terms(state: Module2State) -> dict:
     """Extract up to MAX_MESH_TERMS single MeSH terms from the vignette, symptom/disease-name first."""
-    llm = get_llm().with_structured_output(MeshTermList)
+    llm = get_structured_llm(MeshTermList)
     result: MeshTermList = llm.invoke(
         "You are extracting PubMed MeSH search terms from a clinical vignette.\n"
         f"List up to {MAX_MESH_TERMS} single MeSH terms (one concept per term, no boolean "
@@ -105,7 +105,7 @@ def search_case_reports(state: dict) -> dict:
     if count > CASE_REPORT_COUNT_THRESHOLD:
         other_terms = [t for t in all_terms if t != term]
         if other_terms:
-            llm = get_llm().with_structured_output(RelatedTermPick)
+            llm = get_structured_llm(RelatedTermPick)
             pick: RelatedTermPick = llm.invoke(
                 "A PubMed case-report search for this MeSH term returned too many results:\n"
                 f"Term: {term}\nOther extracted MeSH terms: {other_terms}\n\n"
@@ -128,7 +128,7 @@ def search_case_reports(state: dict) -> dict:
         }
         return {"new_ddx": [], "search_log": [log_entry]}
 
-    llm = get_llm().with_structured_output(CandidateDiagnoses)
+    llm = get_structured_llm(CandidateDiagnoses)
     candidates: CandidateDiagnoses = llm.invoke(
         "These are PubMed case-report titles found by the search below. Of the diagnosis/disease "
         f"names mentioned in these titles, pick at most the {MAX_CANDIDATES_PER_TERM} most "

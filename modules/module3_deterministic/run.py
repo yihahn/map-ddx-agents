@@ -6,7 +6,7 @@ from pathlib import Path
 from schema import DDxItem
 
 from .graph import OUTPUT_DIR, module3_app
-from .llm import get_langfuse_handler
+from .llm import MAX_CONCURRENT_REQUESTS, get_langfuse_handler
 
 # Input: a PT## patient id, resolved against the newest Module 1 and Module 2 run directories for
 # that patient (--limit caps how many merged diagnoses are verified, for cheap trial runs). Output:
@@ -50,7 +50,7 @@ def run(patient_id: str, limit: int | None = None) -> dict:
             "module2_ddx": module2_ddx,
             "limit": limit,
         },
-        config={"callbacks": [get_langfuse_handler()]},
+        config={"callbacks": [get_langfuse_handler()], "max_concurrency": MAX_CONCURRENT_REQUESTS},
     )
 
 

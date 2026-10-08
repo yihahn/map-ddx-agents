@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from schema import DDxItem, Evidence
 
-from .llm import get_llm
+from .llm import get_structured_llm
 from .normalize import group_by_similarity, match_to_mondo
 
 # Input: a patient vignette (+ problem list) as free text, under state keys "vignette",
@@ -65,7 +65,7 @@ class Module1State(dict):
 
 def recruit_specialists(state: Module1State) -> dict:
     """Pick NUM_DEPARTMENTS specialties to consult, with at least one rare/non-mainstream department."""
-    llm = get_llm().with_structured_output(RecruitedDepartments)
+    llm = get_structured_llm(RecruitedDepartments)
     result: RecruitedDepartments = llm.invoke(
         "You are the orchestrator of a multidisciplinary case conference.\n"
         f"Read the clinical vignette below and decide exactly {NUM_DEPARTMENTS} medical specialties "
@@ -101,7 +101,7 @@ def specialist_ddx(state: dict) -> dict:
     """
     department = state["department"]
 
-    llm = get_llm().with_structured_output(SpecialistTop3)
+    llm = get_structured_llm(SpecialistTop3)
     result: SpecialistTop3 = llm.invoke(
         f"You are a senior attending physician in {department}, participating in a "
         "multidisciplinary case conference.\n"

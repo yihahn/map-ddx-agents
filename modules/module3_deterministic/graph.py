@@ -14,7 +14,7 @@ from schema import DDxItem, Evidence, WorkupGap
 from .criteria import fetch_reference_text
 from .embed import group_by_similarity
 from .emr import TOP_K, attribute_doc, load_document, rank_documents
-from .llm import DEFAULT_BACKEND, get_llm
+from .llm import DEFAULT_BACKEND, get_structured_llm
 
 # Input: Module 1 and Module 2 DDx lists plus the patient id whose EMR backs the verification, under
 # state keys "module1_ddx", "module2_ddx", "patient_id", "run_dir". Output: final_ddx_list (DDxItems
@@ -282,8 +282,8 @@ def fetch_criteria(state: dict) -> dict:
         _write_branch(state["verify_run_dir"], ddx_item.diagnosis_name, {"criteria": log})
         return {"criteria": [], "criteria_log": [log]}
 
-    parser = get_llm().with_structured_output(ParsedCriteria)
-    parsed: ParsedCriteria = parser.invoke(
+    parser = get_structured_llm(ParsedCriteria)
+    prompt = (
         f"Below is the {source_doc} reference page for '{ddx_item.diagnosis_name}'.\n\n"
         "Extract only the diagnostic criteria — the findings, tests and thresholds used to make or "
         "exclude this diagnosis. Skip treatment, prognosis and epidemiology.\n\n"
@@ -317,6 +317,19 @@ def fetch_criteria(state: dict) -> dict:
         "item you cannot name a record for.\n\n"
         f"Page text:\n{raw_text[:MAX_REFERENCE_CHARS]}"
     )
+    try:
+        parsed: ParsedCriteria = parser.invoke(prompt)
+    except Exception as exc:
+        # One unparseable or rate-limited reply must not take down the whole fan-out: the
+        # diagnosis goes on with no criteria (as when no reference page exists), flagged.
+        log = {
+            "diagnosis_name": ddx_item.diagnosis_name, "source_doc": source_doc,
+            "detail": detail, "criteria_count": 0, "error": f"{type(exc).__name__}: {exc}"[:300],
+        }
+        _write_branch(state["verify_run_dir"], ddx_item.diagnosis_name, {"criteria": log})
+        return {"criteria": [], "criteria_log": [log],
+                "branch_errors": [{"diagnosis_name": ddx_item.diagnosis_name,
+                                   "error": f"criteria extraction failed: {log['error']}"}]}
     criteria = [
         Criterion(text=c.text, source_doc=source_doc, checkable_by=c.checkable_by)
         for c in parsed.criteria
@@ -377,7 +390,7 @@ def _judge_against_document(
     """
     listed = "\n".join(f"{i}. {c.text}" for i, c in enumerate(criteria, 1))
     try:
-        return get_llm(backend=VERIFIER_BACKEND).with_structured_output(DocJudgements).invoke(
+        return get_structured_llm(DocJudgements, backend=VERIFIER_BACKEND).invoke(
             f"Patient record {doc_id}:\n{doc_text[:MAX_DOCUMENT_CHARS]}\n\n"
             f"Judge each numbered criterion for '{diagnosis_name}' against this record and nothing "
             f"else.\n\n{listed}\n\n"
@@ -696,7 +709,7 @@ def build_workup_gap(state: dict) -> dict:
 
     listed = "\n".join(f"{i}. {c}" for i, c in enumerate(unconfirmed, 1))
     try:
-        plan = get_llm().with_structured_output(WorkupPlan).invoke(
+        plan = get_structured_llm(WorkupPlan).invoke(
             f"These diagnostic criteria for '{ddx_item.diagnosis_name}' could not be confirmed or "
             f"refuted from the patient's record:\n{listed}\n\n"
             "For each one that a test, study, or documented observation would settle, name that "

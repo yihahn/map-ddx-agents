@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .graph import OUTPUT_DIR, module2_app
-from .llm import get_langfuse_handler
+from .llm import MAX_CONCURRENT_REQUESTS, get_langfuse_handler
 
 # Input: a PT## patient id (positional arg), resolved to pending_diag/ddx_vignette/<PID>_ddx_vignette_v1.md
 # (main vignette only, not the *_appendix.md QA file). Output: prints the final_ddx_list and the
@@ -26,7 +26,7 @@ def run(patient_id: str) -> dict:
 
     result = module2_app.invoke(
         {"vignette": vignette, "patient_id": patient_id, "run_dir": str(run_dir)},
-        config={"callbacks": [get_langfuse_handler()]},
+        config={"callbacks": [get_langfuse_handler()], "max_concurrency": MAX_CONCURRENT_REQUESTS},
     )
     return result
 
