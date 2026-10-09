@@ -6,17 +6,25 @@ from pathlib import Path
 from schema import DDxItem
 
 from .graph import OUTPUT_DIR, module3_app
+from ..backends import MAX_CONCURRENCY
 from .llm import get_langfuse_handler
 
 # Input: a PT## patient id, resolved against the newest Module 1 and Module 2 run directories for
 # that patient (--limit caps how many merged diagnoses are verified, for cheap trial runs). Output:
 # prints the refined DDx list, the diagnoses the record ruled out (written separately to
-# decline_ddx_list.json), the workup gaps, how much of the EMR each diagnosis was actually
-# checked against, and the run directory each stage's JSON went to.
+# decline_ddx_list.json), the ones dropped for naming a drug the record never mentions
+# (medication_filtered_ddx_list.json), the workup gaps, how much of the EMR each diagnosis was
+# actually checked against, and the run directory each stage's JSON went to.
 # Algorithm: locate the latest modules/module{1,2}_deterministic/output/<PID>_*/ run, load their
 # final DDx JSON back into DDxItem, create a fresh output/<PID>_<timestamp>/ directory, and invoke
 # module3_app with a Langfuse callback; --limit is applied to the merged list by truncating
 # prelim_ddx_list before fan-out, so the verification work stays proportional to it.
+
+# How many branches may run at once — the active backend's own capacity (modules/backends.py): 12
+# on gpu200, 2 on infer:11239, which refuses a third request in flight with 429. Fan-out here is
+# wider than either on its own — five specialties, one search per plan, one subgraph per diagnosis
+# — so without a cap the branches reject each other, and a branch that dies on 429 is
+# indistinguishable in the output from one the record could not settle.
 
 MODULES_DIR = Path(__file__).resolve().parents[1]
 MODULE1_OUTPUT = MODULES_DIR / "module1_deterministic" / "output"
@@ -50,7 +58,7 @@ def run(patient_id: str, limit: int | None = None) -> dict:
             "module2_ddx": module2_ddx,
             "limit": limit,
         },
-        config={"callbacks": [get_langfuse_handler()]},
+        config={"callbacks": [get_langfuse_handler()], "max_concurrency": MAX_CONCURRENCY},
     )
 
 
@@ -65,6 +73,13 @@ def main() -> None:
     declined = result.get("declined_ddx_list") or []
     print(f"\nDeclined ({len(declined)}, in decline_ddx_list.json): "
           f"{', '.join(i.diagnosis_name for i in declined) or 'none'}")
+
+    # Removed for want of the drug they are named after, which is a different claim from declined:
+    # no criterion was weighed, so the reason is printed with each one.
+    drug_filtered = result.get("medication_filtered_ddx_list") or []
+    reasons = {d["diagnosis_name"]: d["substance"] for d in result.get("medication_filter") or []}
+    print(f"Filtered on medication ({len(drug_filtered)}, in medication_filtered_ddx_list.json): "
+          f"{', '.join(f'{i.diagnosis_name} [{reasons.get(i.diagnosis_name)}]' for i in drug_filtered) or 'none'}")
     print(f"Workup gaps: {len(result['final_gap_list'])}")
 
     # How hard each branch actually looked. A diagnosis judged off two lookups was not really

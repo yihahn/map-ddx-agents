@@ -1,9 +1,11 @@
 import html
 import re
+import sqlite3
 import threading
 import time
 import urllib.parse
 import xml.etree.ElementTree as ET
+from contextlib import closing
 from pathlib import Path
 
 import numpy as np
@@ -21,8 +23,11 @@ from .embed import get_encoder
 # top 8 hits, and raised rate-limit errors, none of which a fixed local index does. The matched
 # article is then scraped (article pages are server-rendered, unlike Merck's search), spaced to the
 # Crawl-delay: 5 its robots.txt asks for and cached per diagnosis. If Merck has no close article,
-# fall back to the StatPearls chapter NCBI Bookshelf holds for the diagnosis, keeping only the
-# sections that decide a diagnosis. MedlinePlus was the fallback before and could not serve this
+# fall back to the StatPearls chapter for the diagnosis, keeping only the sections that decide a
+# diagnosis: the chapter is found through E-utilities as before, and its text is read from NLM's
+# LitArch archive indexed by data_prep/build_statpearls_index.py rather than from the Bookshelf web
+# page, which forbids automated retrieval and has answered with a reCAPTCHA page since September
+# 2026. MedlinePlus was the fallback before and could not serve this
 # module: it is NLM's consumer resource, so its sepsis topic describes the workup ("will likely
 # order lab tests") without a single threshold to check an EMR against, and it has no colchicine
 # poisoning topic at all. StatPearls is written for clinicians and carries the thresholds.
@@ -31,7 +36,6 @@ MERCK_SIMILARITY_FLOOR = 0.85
 MERCK_CRAWL_DELAY = 5.0
 TABLE_PATH = "/multimedia/table/"
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
-BOOKSHELF_URL = "https://www.ncbi.nlm.nih.gov/books/{accession}/"
 NCBI_DELAY = 0.4  # eutils allows 3 requests/second without an API key
 NCBI_ATTEMPTS = 3
 NCBI_RETRY_BACKOFF = 1.0
@@ -41,6 +45,8 @@ NCBI_RETRY_BACKOFF = 1.0
 # the toxicity section lives ("Colchicine poisoning" vs the "Colchicine" chapter scores 0.558).
 STATPEARLS_SIMILARITY_FLOOR = 0.50
 STATPEARLS_SECTIONS = ("Evaluation", "History and Physical", "Differential Diagnosis", "Toxicity")
+# The chapter text, built once from the LitArch archive by data_prep/build_statpearls_index.py.
+STATPEARLS_DB = Path(__file__).resolve().parents[2] / "data_prep" / "statpearls" / "statpearls.sqlite"
 _TOXIC_SUFFIXES = ("poisoning", "toxicity", "intoxication", "overdose")
 USER_AGENT = "map-ddx-agents/0.1"
 REQUEST_TIMEOUT = 40
@@ -245,12 +251,45 @@ def _statpearls_chapters(diagnosis_name: str) -> list[tuple[str, str]] | None:
     return chapters
 
 
+def _archived_sections(title: str) -> list[tuple[str, str]] | None:
+    """(section name, text) of the archived chapter with this title, decision sections only.
+
+    None means the archive has no chapter under that title, which is a different answer from a
+    chapter that has none of STATPEARLS_SECTIONS (an empty list). A missing index raises rather
+    than returning None: without it every StatPearls fallback would fail the same quiet way the
+    reCAPTCHA did, and the run would look like a run where StatPearls covered nothing.
+    """
+    if not STATPEARLS_DB.exists():
+        raise FileNotFoundError(
+            f"{STATPEARLS_DB} not found — download the LitArch archive and run "
+            "data_prep/build_statpearls_index.py first"
+        )
+    key = " ".join(title.split()).lower()
+    marks = ", ".join("?" for _ in STATPEARLS_SECTIONS)
+    with closing(sqlite3.connect(f"file:{STATPEARLS_DB}?mode=ro", uri=True)) as db:
+        row = db.execute("SELECT article_id FROM chapters WHERE title_key = ?", (key,)).fetchone()
+        if row is None:
+            return None
+        return db.execute(
+            f"SELECT name, text FROM sections WHERE article_id = ? AND name IN ({marks}) "
+            "ORDER BY ordinal",
+            (row[0], *STATPEARLS_SECTIONS),
+        ).fetchall()
+
+
 def _fetch_statpearls(diagnosis_name: str) -> tuple[str | None, str]:
     """Return the decision-making sections of the closest StatPearls chapter, and what matched.
 
     Only STATPEARLS_SECTIONS are kept. A chapter runs to ~90KB of epidemiology, treatment and
     review questions, and handing all of that to the criteria extractor buries the few paragraphs
     that actually say how the diagnosis is established.
+
+    The chapter is chosen exactly as before — E-utilities [title] search, then title similarity —
+    and only where its text comes from has changed: the LitArch archive instead of the Bookshelf
+    page. Bookshelf began serving a reCAPTCHA page to every non-browser client between 2026-09-07
+    and -09-22, with HTTP 200, and because the challenge page has no headings it was reported as a
+    chapter "with none of" the sections — 52 of the 10-02 run's diagnoses lost their criteria to it
+    while reading as if StatPearls simply had nothing to say.
     """
     chapters = _statpearls_chapters(diagnosis_name)
     if chapters is None:
@@ -268,26 +307,13 @@ def _fetch_statpearls(diagnosis_name: str) -> tuple[str | None, str]:
     if score < STATPEARLS_SIMILARITY_FLOOR:
         return None, f"closest chapter '{title}' only {score:.3f}"
 
-    page = _ncbi_get(BOOKSHELF_URL.format(accession=accession), {})
-    if page is None:
-        return None, f"matched '{title}' but the chapter would not load after {NCBI_ATTEMPTS} tries"
-
-    soup = BeautifulSoup(page.text, "html.parser")
-    kept = []
-    for heading in soup.find_all(["h2", "h3"]):
-        if heading.get_text(strip=True) not in STATPEARLS_SECTIONS:
-            continue
-        body = []
-        for element in heading.find_next_siblings():
-            if element.name in ("h2", "h3"):
-                break
-            body.append(element.get_text(separator="\n", strip=True))
-        text = "\n".join(part for part in body if part)
-        if text:
-            kept.append(f"{heading.get_text(strip=True)}\n{text}")
+    found = _archived_sections(title)
+    if found is None:
+        return None, f"matched '{title}' but it is not in the LitArch archive"
+    kept = [f"{name}\n{text}" for name, text in found]
     if not kept:
         return None, f"matched '{title}' but it has none of {', '.join(STATPEARLS_SECTIONS)}"
-    return "\n\n".join(kept), f"{title} ({accession}, title similarity {score:.3f})"
+    return "\n\n".join(kept), f"{title} ({accession}, title similarity {score:.3f}, LitArch)"
 
 
 def fetch_reference_text(diagnosis_name: str) -> tuple[str | None, str | None, str]:

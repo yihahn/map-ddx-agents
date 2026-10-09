@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from schema import DDxItem, Evidence
 
+from .departments import DEPARTMENTS, as_prompt_list, resolve
 from .llm import get_llm
 from .normalize import group_by_similarity, match_to_mondo
 
@@ -16,7 +17,8 @@ from .normalize import group_by_similarity, match_to_mondo
 # "patient_id", "run_dir" (a pre-created output subdirectory). Output: final_ddx_list (list[DDxItem])
 # of preliminary differential diagnoses agreed across specialty personas, with each stage's
 # intermediate result written as its own JSON file under run_dir for auditing. Algorithm: mirrors
-# spec_docs/module1_deterministic.md — recruit NUM_DEPARTMENTS specialties from the vignette (-> 01),
+# spec_docs/module1_deterministic.md — recruit NUM_DEPARTMENTS departments from the vignette,
+# chosen from this hospital's roster in departments.py (-> 01),
 # fan out one persona per specialty that returns its top DDX_PER_SPECIALIST diagnoses with verbatim
 # vignette quotes as evidence (-> 02, 03), then take the union by grouping diagnosis names on BioLORD
 # similarity (best match above threshold, as in Module 2 but picking the closest candidate rather
@@ -35,7 +37,7 @@ def _write_json(path: Path, data) -> None:
 
 
 class RecruitedDepartments(BaseModel):
-    departments: list[str]  # exactly NUM_DEPARTMENTS
+    departments: list[str]  # exactly NUM_DEPARTMENTS, each a name from departments.DEPARTMENTS
 
 
 class EvidenceQuote(BaseModel):
@@ -64,21 +66,43 @@ class Module1State(dict):
 
 
 def recruit_specialists(state: Module1State) -> dict:
-    """Pick NUM_DEPARTMENTS specialties to consult, with at least one rare/non-mainstream department."""
+    """Convene NUM_DEPARTMENTS departments for the case, chosen from this hospital's own roster.
+
+    The departments used to be named freely from the vignette, which produced services this
+    hospital does not run — PT09's conference was convened with "Clinical Toxicology" — so the
+    roster in departments.py is what the model is given to pick from.
+
+    What comes back is normalised against the roster, not filtered by it: "Nephrology (NPH)",
+    "NPH" and "nephrology" all become "Nephrology". Nothing is discarded. Dropping the unmatched
+    ones emptied a whole conference the first time it ran, because every name came back with its
+    code attached, and a recruit that silently returns four departments instead of five is worse
+    than one that returns a name the roster does not have. A name that resolves to nothing is kept
+    as the model wrote it.
+    """
     llm = get_llm().with_structured_output(RecruitedDepartments)
     result: RecruitedDepartments = llm.invoke(
-        "You are the orchestrator of a multidisciplinary case conference.\n"
-        f"Read the clinical vignette below and decide exactly {NUM_DEPARTMENTS} medical specialties "
-        "to convene for differential diagnosis.\n\n"
+        "You are the orchestrator of a multidisciplinary case conference at a tertiary hospital.\n"
+        f"Read the clinical vignette below and decide exactly {NUM_DEPARTMENTS} departments to "
+        "convene for differential diagnosis.\n\n"
         "Constraints:\n"
-        "- At least one must be a rare or non-mainstream specialty (e.g. Clinical Toxicology, "
-        "Medical Genetics, Immunology) rather than a common one.\n"
-        "- Do not include three or more specialties from the same family (e.g. not Cardiology + "
-        "Cardiac Surgery + Interventional Cardiology together).\n"
-        "- Return English specialty names only.\n\n"
+        "- Choose only from this hospital's department roster below. Each roster line is a "
+        "department name followed by its code in parentheses; return the name. A department not "
+        "on the roster cannot be convened.\n"
+        "- At least one must be a department that would not ordinarily be called for this "
+        "presentation, rather than the obvious ones.\n"
+        "- Do not include three or more departments from the same family (e.g. not Cardiology + "
+        "Cardiovascular and Thoracic Surgery + Vascular Surgery together).\n\n"
+        f"Department roster:\n{as_prompt_list()}\n\n"
         f"Vignette:\n{state['vignette']}"
     )
-    departments = result.departments[:NUM_DEPARTMENTS]
+
+    departments = []
+    for raw in result.departments:
+        name = resolve(raw) or " ".join(raw.split())
+        if name and name not in departments:
+            departments.append(name)
+    departments = departments[:NUM_DEPARTMENTS]
+
     _write_json(Path(state["run_dir"]) / "01_departments.json", departments)
     return {"departments": departments}
 
@@ -103,8 +127,9 @@ def specialist_ddx(state: dict) -> dict:
 
     llm = get_llm().with_structured_output(SpecialistTop3)
     result: SpecialistTop3 = llm.invoke(
-        f"You are a senior attending physician in {department}, participating in a "
-        "multidisciplinary case conference.\n"
+        f"You are a senior attending physician in this hospital's {department}"
+        f"{f' ({DEPARTMENTS[department]})' if department in DEPARTMENTS else ''} department, "
+        "participating in a multidisciplinary case conference.\n"
         f"From your specialty's perspective, give the top {DDX_PER_SPECIALIST} differential "
         "diagnoses for the patient below. Reason from what your specialty would notice that "
         "others might miss — do not list generic diagnoses any department would name.\n\n"

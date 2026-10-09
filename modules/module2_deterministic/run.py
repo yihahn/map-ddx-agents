@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .graph import OUTPUT_DIR, module2_app
+from ..backends import MAX_CONCURRENCY
 from .llm import get_langfuse_handler
 
 # Input: a PT## patient id (positional arg), resolved to pending_diag/ddx_vignette/<PID>_ddx_vignette_v1.md
@@ -12,6 +13,12 @@ from .llm import get_langfuse_handler
 # output/<PID>_<YYYYMMDD_HHMMSS>/ run directory, read the vignette markdown as plain text, invoke
 # module2_app (passing run_dir through state so each node writes its own stage file there) with a
 # Langfuse callback attached for tracing, then report the result.
+
+# How many branches may run at once — the active backend's own capacity (modules/backends.py): 12
+# on gpu200, 2 on infer:11239, which refuses a third request in flight with 429. Fan-out here is
+# wider than either on its own — five specialties, one search per plan, one subgraph per diagnosis
+# — so without a cap the branches reject each other, and a branch that dies on 429 is
+# indistinguishable in the output from one the record could not settle.
 
 VIGNETTE_DIR = Path(__file__).resolve().parents[2] / "pending_diag" / "ddx_vignette"
 
@@ -26,7 +33,7 @@ def run(patient_id: str) -> dict:
 
     result = module2_app.invoke(
         {"vignette": vignette, "patient_id": patient_id, "run_dir": str(run_dir)},
-        config={"callbacks": [get_langfuse_handler()]},
+        config={"callbacks": [get_langfuse_handler()], "max_concurrency": MAX_CONCURRENCY},
     )
     return result
 

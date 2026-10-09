@@ -1,5 +1,7 @@
 # 원본 온톨로지, 용량 큼 → README에 다운로드 링크만 남김
 data_prep/mondo.json          
+# StatPearls LitArch 아카이브(2GB)와 그 인덱스(257MB) — 용량 큼, CC BY-NC-ND라 재배포도 하지 않음
+data_prep/statpearls/
 *.pt
 *.npy
 # BioLORD 임베딩 캐시(추후 생성될 파일), 팀원마다 로컬 재생성 

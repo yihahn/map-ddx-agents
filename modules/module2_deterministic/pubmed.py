@@ -46,7 +46,16 @@ def _get(endpoint: str, **params) -> dict:
             time.sleep(2**attempt)
             continue
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        # esearch can answer 200 with an error body and no result fields ("Search Backend failed")
+        # for a query that succeeds when sent again; PT03's run died on one with a KeyError.
+        result = data.get("esearchresult")
+        if result is not None and "count" not in result:
+            if attempt < 3:
+                time.sleep(2**attempt)
+                continue
+            raise RuntimeError(f"esearch returned no result: {result.get('ERROR') or result}")
+        return data
 
 
 def esearch_count(query: str) -> int:

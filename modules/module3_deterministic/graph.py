@@ -1,4 +1,5 @@
 import json
+import math
 import operator
 import os
 import re
@@ -11,20 +12,26 @@ from pydantic import BaseModel
 
 from schema import DDxItem, Evidence, WorkupGap
 
+from . import criteria_literature, criteria_web
 from .criteria import fetch_reference_text
 from .embed import group_by_similarity
 from .emr import TOP_K, attribute_doc, load_document, rank_documents
 from .llm import DEFAULT_BACKEND, get_llm
+from .medication import find_exposure_mentions, load_medications
 
 # Input: Module 1 and Module 2 DDx lists plus the patient id whose EMR backs the verification, under
 # state keys "module1_ddx", "module2_ddx", "patient_id", "run_dir". Output: final_ddx_list (DDxItems
 # with status re-decided and EMR-sourced evidence) and final_gap_list (WorkupGaps), with each stage
 # written under run_dir for auditing. Algorithm: mirrors spec_docs/module3_deterministic.md — merge
-# the two lists by exact diagnosis name (-> 01), then Send one verification subgraph per diagnosis
-# that scrapes reference criteria (Merck, else StatPearls), checks each criterion against the EMR by
-# walking that criterion's ranked documents, and splits the outcome into a deterministic status
-# rule and a workup-gap record; aggregate collects both fan-ins, sending the diagnoses the record
-# ruled out to their own decline_ddx_list.json (-> 02, 03, 04, 05, 06). Every
+# the two lists by exact diagnosis name (-> 01), drop the diagnoses named after a drug the record
+# never mentions (-> 07), then Send one verification subgraph per remaining diagnosis
+# that finds weighted diagnostic criteria (a guideline or reference found through DuckDuckGo or
+# PubMed; Merck/StatPearls under MODULE3_CRITERIA_SOURCE=reference), checks each criterion against
+# the EMR by walking that criterion's ranked documents (a refutation counts only if a second call
+# reading the same record confirms it), and splits the outcome into a deterministic
+# status rule, a score (summed weight of supported criteria) and a workup-gap record; aggregate
+# collects the fan-ins, sends the diagnoses the record ruled out to their own decline_ddx_list.json,
+# and ranks the rest by score, then by an LLM reading of the vignette (-> 02-06, 08). Every
 # judgement is recorded with the EMR document it traces back to and with the ordered list of lookups
 # the loop made (-> 06), so a run says not just what it concluded but how much of the record it read
 # to get there. The per-diagnosis fields live in a subgraph state, not Module3State, because
@@ -58,7 +65,13 @@ MIN_QUERY_SCORE = 0.30
 # Which backend judges criteria against the EMR. This node makes the judgement the whole module
 # turns on, so it is the one worth pointing at a different model; every other node just reads prose.
 VERIFIER_BACKEND = os.environ.get("MODULE3_VERIFIER_BACKEND", DEFAULT_BACKEND)
+# Where diagnostic criteria come from. "web" (the default since v3) searches DuckDuckGo and PubMed
+# for a society guideline first, then the best other source, and extracts weighted key findings
+# (criteria_web / criteria_literature). "reference" is the earlier Merck-then-StatPearls scrape with
+# its verbatim-statement prompt, kept so the runs behind the v1/v2 reports can be reproduced.
+CRITERIA_SOURCE = os.environ.get("MODULE3_CRITERIA_SOURCE", "web")
 OUTPUT_DIR = Path(__file__).parent / "output"
+VIGNETTE_DIR = Path(__file__).resolve().parents[2] / "pending_diag" / "ddx_vignette"
 
 
 def _write_json(path: Path, data) -> None:
@@ -79,6 +92,7 @@ class Criterion(BaseModel):
     text: str
     source_doc: str
     checkable_by: str  # the record that would settle this item, from ParsedCriterion
+    weight: float = 0.0  # share of the diagnosis this finding carries; a diagnosis's weights sum to 1
 
 
 # What the parser returns. checkable_by is not documentation — it is the filter: a criterion whose
@@ -140,8 +154,12 @@ class Module3State(dict):
     branch_errors: Annotated[list[dict], operator.add]
     refined_ddx: Annotated[list[DDxItem], operator.add]
     workup_gaps: Annotated[list[WorkupGap], operator.add]
+    scores: Annotated[list[dict], operator.add]
+    medication_list: list[dict]
+    medication_filter: list[dict]
     final_ddx_list: list[DDxItem]
     declined_ddx_list: list[DDxItem]
+    medication_filtered_ddx_list: list[DDxItem]
     final_gap_list: list[WorkupGap]
 
 
@@ -158,6 +176,7 @@ class DDxVerificationState(dict):
     branch_errors: Annotated[list[dict], operator.add]
     refined_ddx: Annotated[list[DDxItem], operator.add]
     workup_gaps: Annotated[list[WorkupGap], operator.add]
+    scores: Annotated[list[dict], operator.add]
 
 
 def merge_prelim_ddx(state: Module3State) -> dict:
@@ -270,7 +289,11 @@ def fetch_criteria(state: dict) -> dict:
     - when neither source has the diagnosis, criteria is left empty rather than filled with
       whatever text came back
     - returns {"criteria": [...], "criteria_log": [dict]}
+
+    This is the "reference" source. The default "web" source is _fetch_web_criteria below.
     """
+    if CRITERIA_SOURCE == "web":
+        return _fetch_web_criteria(state)
     ddx_item: DDxItem = state["ddx_item"]
     raw_text, source_doc, detail = fetch_reference_text(ddx_item.diagnosis_name)
 
@@ -325,6 +348,49 @@ def fetch_criteria(state: dict) -> dict:
         "diagnosis_name": ddx_item.diagnosis_name, "source_doc": source_doc,
         "detail": detail, "criteria_count": len(criteria),
         "criteria": [{"text": c.text, "checkable_by": c.checkable_by} for c in criteria],
+    }
+    _write_branch(state["verify_run_dir"], ddx_item.diagnosis_name, {"criteria": log})
+    return {"criteria": criteria, "criteria_log": [log]}
+
+
+def _fetch_web_criteria(state: dict) -> dict:
+    """
+    - find a source and its criteria with criteria_web.find_criteria_with_fallback: a society
+      guideline from DuckDuckGo or PubMed first, then DuckDuckGo's best other result, then PubMed's
+    - each source is read with criteria_literature.criteria_prompt, which asks for the key findings
+      in the model's own words, one per test, and a weight per finding; the weights are rescaled to
+      sum to exactly 1, since the model's arithmetic is not relied on
+    - the prompt was settled over six rounds on nine diagnoses (2026-10-07/08); its rules are the
+      fixes for what each round got wrong — combination rules listed as items, superseded criteria
+      versions, findings narrowed to their typical form, missing exclusions and reference tests
+    - a source that yields nothing moves the search on to the next; no source leaves criteria empty
+    - returns {"criteria": [...], "criteria_log": [dict]}
+    """
+    ddx_item: DDxItem = state["ddx_item"]
+    parser = get_llm().with_structured_output(criteria_literature.WeightedCriteria)
+
+    def extract(source_doc: str, text: str) -> list:
+        parsed = parser.invoke(
+            criteria_literature.criteria_prompt(ddx_item.diagnosis_name, source_doc, text)
+        )
+        return criteria_literature.normalize_weights(parsed.criteria) if parsed.criteria else []
+
+    try:
+        found, source_doc, detail = criteria_web.find_criteria_with_fallback(
+            ddx_item.diagnosis_name, extract
+        )
+    except Exception as error:  # a failed search or call leaves this diagnosis unverified, not the run
+        found, source_doc, detail = [], None, f"criteria search failed: {error}"
+    criteria = [
+        Criterion(text=c.text, source_doc=source_doc, checkable_by=c.checkable_by, weight=c.weight)
+        for c in found
+    ]
+    log = {
+        "diagnosis_name": ddx_item.diagnosis_name, "source_doc": source_doc,
+        "detail": detail, "criteria_count": len(criteria),
+        "criteria": [
+            {"text": c.text, "checkable_by": c.checkable_by, "weight": c.weight} for c in criteria
+        ],
     }
     _write_branch(state["verify_run_dir"], ddx_item.diagnosis_name, {"criteria": log})
     return {"criteria": criteria, "criteria_log": [log]}
@@ -386,12 +452,74 @@ def _judge_against_document(
             "value outside the range it names, or a finding it rules out — and 'unconfirmed' if "
             "this record simply does not say. A record that is silent is 'unconfirmed', never "
             "'refuted'.\n"
+            "- Compare every number and duration to the criterion's own threshold or time window. "
+            "A value that falls short of the threshold does not support it; a duration inside the "
+            "window supports it and never refutes it.\n"
+            "- A test that was not done, is only planned or pending, was contraindicated, or was "
+            "done in a different form than the criterion names (e.g. without contrast when it "
+            "names contrast) is 'unconfirmed', not 'refuted'.\n"
+            "- When the criterion lists alternatives ('A or B'), it is supported by any one of them "
+            "and refuted only if the record rules out every one.\n"
+            "- The quote must be about the same finding or test the criterion names. A different "
+            "test, a different pathogen, a plan, or a statement of what cannot yet be concluded "
+            "neither supports nor refutes it.\n"
             "quote must be text copied from the record above, and only for supported or refuted. "
             "Leave quote empty for unconfirmed. Never write a value the record does not contain.\n"
             "Return exactly one entry per criterion number listed above."
         )
     except Exception:
         return None
+
+
+class RefutationCheck(BaseModel):
+    criterion_number: int
+    holds: bool
+
+
+class RefutationChecks(BaseModel):
+    checks: list[RefutationCheck]
+
+
+def _recheck_refutations(
+    diagnosis_name: str, doc_id: str, doc_text: str, refuted: list[tuple[Criterion, str]]
+) -> set[int] | None:
+    """Ask a second time whether each refutation from one record really holds; None if the call fails.
+
+    A refutation is the one judgement that ends a diagnosis outright, and on the v3 runs it was the
+    one most often wrong in a way that mattered: anti-NMDAR encephalitis declined because symptoms
+    "started 2 weeks ago" was read as contradicting "onset within 3 months", neurosarcoidosis and
+    PACNS declined on a contrast MRI that was contraindicated and never done. The first call judges
+    many criteria at once; this one sees only the refutations, each with the quote it rests on, and
+    is asked to confirm rather than to judge, so a refutation stands only if two reads agree.
+    Returns the 0-based indices into refuted whose refutation holds.
+    """
+    listed = "\n".join(
+        f"{i}. Criterion: {c.text}\n   Quote: \"{quote}\"" for i, (c, quote) in enumerate(refuted, 1)
+    )
+    try:
+        result = get_llm(backend=VERIFIER_BACKEND).with_structured_output(RefutationChecks).invoke(
+            f"Patient record {doc_id}:\n{doc_text[:MAX_DOCUMENT_CHARS]}\n\n"
+            f"Each numbered criterion for '{diagnosis_name}' below was judged refuted by this record, "
+            f"on the quote shown.\n\n{listed}\n\n"
+            "For each number, return holds=true only if the quote, read in this record, states a "
+            "result that cannot be true at the same time as the criterion. Return holds=false if "
+            "any of these apply:\n"
+            "- the quote is about a different finding, test or pathogen than the criterion names;\n"
+            "- the test was not done, only planned or pending, contraindicated, or done in a "
+            "different form than the criterion names;\n"
+            "- a number or duration in the quote actually falls inside the criterion's threshold "
+            "or time window;\n"
+            "- the criterion lists alternatives and the record does not rule out every one;\n"
+            "- the quote describes a change, an uncertainty, or something not yet concluded rather "
+            "than a result that contradicts the criterion.\n"
+            "Return exactly one entry per criterion number listed above."
+        )
+    except Exception:
+        return None
+    return {
+        c.criterion_number - 1 for c in result.checks
+        if c.holds and 0 < c.criterion_number <= len(refuted)
+    }
 
 
 def verify_with_emr(state: dict) -> dict:
@@ -472,6 +600,7 @@ def verify_with_emr(state: dict) -> dict:
             )
             date, source = _doc_ref(doc_id)
             resolved = 0
+            traced: list[tuple[Criterion, str, str]] = []
             for entry in judged.judgements if judged else []:
                 index = entry.criterion_number - 1
                 if not 0 <= index < len(group):
@@ -479,22 +608,47 @@ def verify_with_emr(state: dict) -> dict:
                 criterion = group[index]
                 if criterion.text not in pending or entry.judgement == "unconfirmed":
                     continue
+                if any(t[0].text == criterion.text for t in traced):
+                    continue
                 quote = _clean_quote(entry.quote)
                 # The quote has to be in the one document the model was shown. Nothing else can
                 # vouch for it, and a judgement quoting text the record does not contain is the
                 # failure this whole node exists to prevent.
                 if attribute_doc([(doc_id, doc_text)], quote) is None:
                     continue
+                traced.append((criterion, entry.judgement, quote))
+            # A refutation the second read does not confirm is withdrawn, and its criterion stays
+            # pending so the next-ranked document can still settle it. If the second call fails the
+            # first judgement stands, as it did before the re-check existed.
+            refuted = [(c, q) for c, j, q in traced if j == "refuted"]
+            withdrawn: list[dict] = []
+            if refuted:
+                holds = _recheck_refutations(ddx_item.diagnosis_name, doc_id, doc_text, refuted)
+                if holds is not None:
+                    withdrawn = [
+                        {"criterion": c.text, "quote": q}
+                        for i, (c, q) in enumerate(refuted) if i not in holds
+                    ]
+            dropped = {w["criterion"] for w in withdrawn}
+            for criterion, judgement, quote in traced:
+                if judgement == "refuted" and criterion.text in dropped:
+                    continue
                 settled[criterion.text] = AttributedVerification(
                     criterion=criterion.text,
                     content=quote,
-                    judgement=entry.judgement,
+                    judgement=judgement,
                     source=source,
                     date=date,
                     history=list(read.get(criterion.text, [])),
                 )
                 pending.pop(criterion.text)
                 resolved += 1
+            step_extra = {}
+            if refuted:
+                step_extra["refutations_rechecked"] = len(refuted)
+                step_extra["refutations_withdrawn"] = withdrawn
+                if holds is None:
+                    step_extra["recheck"] = "call_failed"
             history.append({
                 "step": len(history) + 1,
                 "round": round_index + 1,
@@ -504,6 +658,7 @@ def verify_with_emr(state: dict) -> dict:
                 "criteria_checked": len(group),
                 "criteria_settled": resolved,
                 "outcome": "judged" if judged else ("call_failed" if doc_text else "load_failed"),
+                **step_extra,
             })
 
     verifications = [
@@ -632,7 +787,13 @@ def determine_status(state: dict) -> dict:
     - date and source_doc name the document the judgement was made against, which verify_with_emr
       recorded when it made it, so the evidence and the verification log cannot disagree
     - a diagnosis with no criteria found stays "pending" and keeps its Module 1/2 evidence
-    - returns {"refined_ddx": [DDxItem]}
+    - the diagnosis's rank score is (summed weight of its supported criteria) x ln(number of
+      supported criteria + 1), under the same traceability rule as the status; aggregate ranks the
+      final list by it. The first factor is how much of the diagnosis the record bears out — the
+      weighted form of supported/total, the weights summing to 1. The second keeps a diagnosis that
+      one or two findings carry from outranking one that many independent findings carry: a
+      diagnosis with four generic criteria otherwise reached 0.75 on three of them
+    - returns {"refined_ddx": [DDxItem], "scores": [dict]}
     """
     ddx_item: DDxItem = state["ddx_item"]
     result: VerificationRecord = state["verification_result"]
@@ -641,7 +802,9 @@ def determine_status(state: dict) -> dict:
         _write_branch(
             state["verify_run_dir"], ddx_item.diagnosis_name, {"refined": carried.model_dump()}
         )
-        return {"refined_ddx": [carried]}
+        score = {"diagnosis_name": ddx_item.diagnosis_name, "has_criteria": False, "score": 0.0,
+                 "supported": []}
+        return {"refined_ddx": [carried], "scores": [score]}
 
     # An untraceable judgement is demoted to unconfirmed, so status and evidence cannot disagree: a
     # diagnosis can no longer come back "supported" off judgements that quote no record.
@@ -674,8 +837,24 @@ def determine_status(state: dict) -> dict:
     refined = ddx_item.model_copy(
         deep=True, update={"status": status, "evidence": list(ddx_item.evidence) + evidence}
     )
-    _write_branch(state["verify_run_dir"], ddx_item.diagnosis_name, {"refined": refined.model_dump()})
-    return {"refined_ddx": [refined]}
+    weights = {c.text: c.weight for c in state.get("criteria") or []}
+    supported = [
+        {"criterion": v.criterion, "weight": weights.get(v.criterion, 0.0)}
+        for v in result.verifications
+        if v.judgement == "supported" and v.source
+    ]
+    weight_sum = sum(s["weight"] for s in supported)
+    score = {
+        "diagnosis_name": ddx_item.diagnosis_name, "has_criteria": True,
+        "score": round(weight_sum * math.log(len(supported) + 1), 4),
+        "supported_weight": round(weight_sum, 4), "supported_count": len(supported),
+        "criteria_count": len(result.verifications), "supported": supported,
+    }
+    _write_branch(
+        state["verify_run_dir"], ddx_item.diagnosis_name,
+        {"refined": refined.model_dump(), "score": score},
+    )
+    return {"refined_ddx": [refined], "scores": [score]}
 
 
 def build_workup_gap(state: dict) -> dict:
@@ -739,6 +918,199 @@ def build_workup_gap(state: dict) -> dict:
     }
 
 
+class DrugInDiagnosis(BaseModel):
+    diagnosis_number: int
+    substance: str = ""  # the specific thing the diagnosis names, empty when it names none
+    kind: Literal["drug", "toxin", "organism", "other"] = "other"
+    medication_number: int = 0  # the listed medication that is that substance, 0 when none is
+
+
+class DrugsInDiagnoses(BaseModel):
+    items: list[DrugInDiagnosis]
+
+
+def filter_by_medication(state: Module3State) -> dict:
+    """Drop diagnoses named after a drug this patient has no documented exposure to.
+
+    A diagnosis like 'Metronidazole-induced encephalopathy' only makes sense for a patient who took
+    metronidazole, so the record can rule it out without any diagnostic criterion — which is what
+    the criteria route misses, since a reference page on metronidazole toxicity never asks whether
+    the drug was given.
+
+    Exposure is decided in three steps rather than one, because the medication CSVs hold only what
+    the hospital ordered. PT09's colchicine, the reference standard's answer, is in none of them:
+    the patient took it before arriving and the drug appears only in a progress note. So a match
+    against the medication list keeps the diagnosis, and a diagnosis with no such match is still
+    only removed once medication.py has searched the whole record for the substance and found it
+    named nowhere. Deletion is the dangerous direction here — Module 3 has already deleted a
+    correct diagnosis's evidence once — so it is the one outcome that has to clear both gates.
+
+    The model is asked to point at a medication rather than to judge exposure, and its answer is a
+    line number checked against the list, so a drug it invents cannot keep a diagnosis alive and a
+    failed call removes nothing.
+
+    It runs on the merged list before any verification, because a diagnosis that needs a drug the
+    patient never took is out regardless of what its criteria would say, and verifying it first
+    spends a whole branch of LLM calls on an answer already known. The removed ones never fan out.
+    """
+    run_dir = Path(state["run_dir"])
+    open_ddx = state.get("prelim_ddx_list") or []
+    medications = load_medications(state["patient_id"])
+    if not open_ddx:
+        _write_json(run_dir / "07_medication_filter.json", [])
+        _write_json(run_dir / "medication_filtered_ddx_list.json", [])
+        return {"medication_list": medications, "medication_filter": []}
+
+    listed_ddx = "\n".join(f"{i}. {d.diagnosis_name}" for i, d in enumerate(open_ddx, 1))
+    listed_meds = "\n".join(
+        f"{i}. {m['medication']} ({m['source']})" for i, m in enumerate(medications, 1)
+    ) or "(no medication records)"
+    try:
+        reply = get_llm().with_structured_output(DrugsInDiagnoses).invoke(
+            f"Differential diagnoses:\n{listed_ddx}\n\n"
+            f"Medications recorded for this patient (Korean product name, ingredient in "
+            f"parentheses):\n{listed_meds}\n\n"
+            "Return one entry per numbered diagnosis. Set substance to the specific thing the "
+            "diagnosis is named after, in English — 'Metronidazole-induced encephalopathy' gives "
+            "'metronidazole'. Leave substance empty when the diagnosis names nothing in "
+            "particular: a class or mechanism such as 'Drug-induced liver injury', 'DRESS "
+            "syndrome' or 'Hypersensitivity reaction' names none.\n"
+            "Set kind to what that thing is: 'drug' for a medication, 'toxin' for a poison, venom "
+            "or chemical exposure, 'organism' for an infectious agent — a bacterium, virus, "
+            "fungus or parasite, as in 'Pneumocystis pneumonia' or 'Leishmaniasis' — and 'other' "
+            "for anything else. An organism is not something a patient is prescribed, so this "
+            "distinction decides whether the medication list has any bearing on the diagnosis.\n"
+            "Set medication_number to the number of the medication above that is that same "
+            "substance, matching the Korean ingredient to the English name, and 0 when none of "
+            "them is. Do not guess: only a medication that really is that substance counts."
+        )
+    except Exception as error:
+        _write_json(run_dir / "07_medication_filter.json", [])
+        _write_json(run_dir / "medication_filtered_ddx_list.json", [])
+        return {
+            "medication_list": medications,
+            "medication_filter": [],
+            "branch_errors": [{"node": "filter_by_medication", "error": str(error)}],
+        }
+
+    decisions = []
+    for item in reply.items:
+        index = item.diagnosis_number - 1
+        substance = item.substance.strip()
+        if not (0 <= index < len(open_ddx)) or not substance:
+            continue
+        # Only an exposure the patient could have been given is answerable from a medication list.
+        # Asked for "the substance the diagnosis is named after", the model returned the organism
+        # for 'Pneumocystis pneumonia' and 'Leishmaniasis', and both were deleted for not being
+        # among PT03's prescriptions — a filter on drug exposure had removed two infections.
+        # Naming the kind costs nothing in the same call and puts that decision in the log.
+        if item.kind not in ("drug", "toxin"):
+            continue
+        decision = {
+            "diagnosis_name": open_ddx[index].diagnosis_name,
+            "substance": substance,
+            "kind": item.kind,
+        }
+
+        if 1 <= item.medication_number <= len(medications):
+            matched = medications[item.medication_number - 1]
+            decisions.append(
+                decision
+                | {
+                    "exposure": "prescribed",
+                    "kept": True,
+                    "matched_medication": matched["medication"],
+                    "matched_source": matched["source"],
+                }
+            )
+            continue
+
+        mentions = find_exposure_mentions(state["patient_id"], substance)
+        if mentions:
+            decisions.append(decision | {"exposure": "mentioned", "kept": True, "mentions": mentions})
+        else:
+            # Recorded with the list that was checked, so a drug the model failed to recognise in
+            # its Korean form is visible as a miss rather than hidden behind a bare verdict.
+            decisions.append(
+                decision
+                | {
+                    "exposure": "absent",
+                    "kept": False,
+                    "medications_checked": [m["medication"] for m in medications],
+                }
+            )
+
+    # Written here rather than in aggregate, like 01, so a run that dies during verification still
+    # records what was removed before it.
+    filtered_names = {d["diagnosis_name"] for d in decisions if not d["kept"]}
+    drug_filtered = [item for item in open_ddx if item.diagnosis_name in filtered_names]
+    _write_json(run_dir / "07_medication_filter.json", decisions)
+    _write_json(
+        run_dir / "medication_filtered_ddx_list.json", [i.model_dump() for i in drug_filtered]
+    )
+    return {
+        "medication_list": medications,
+        "medication_filter": decisions,
+        "medication_filtered_ddx_list": drug_filtered,
+        "prelim_ddx_list": [i for i in open_ddx if i.diagnosis_name not in filtered_names],
+    }
+
+
+class LikelihoodOrder(BaseModel):
+    order: list[int]  # the listed diagnoses' numbers, most likely first
+
+
+def _rank_final(state: Module3State, remaining: list[DDxItem]) -> tuple[list[DDxItem], list[dict]]:
+    """Order the final list: first by score, then the rest as an LLM ranks them from the vignette.
+
+    A diagnosis's score is the summed weight of its criteria the EMR supported times
+    ln(supported count + 1) (determine_status), so it measures how much of the diagnosis the record
+    already bears out and on how many findings, and those with any score come first, highest first. The rest — no criteria found, or none supported yet — cannot be told
+    apart that way, so the model is given the patient's clinical vignette and asked to order them by
+    how likely each is; they follow the scored ones. Its answer is a list of numbers checked against
+    the list, and anything it leaves out or repeats keeps its merged order at the end, so a failed
+    call loses no diagnosis. Ties in score keep the merged order, which puts diagnoses both modules
+    named first.
+    """
+    scores = {s["diagnosis_name"]: s for s in state.get("scores") or []}
+    scored = [i for i in remaining if scores.get(i.diagnosis_name, {}).get("score", 0) > 0]
+    scored.sort(key=lambda i: -scores[i.diagnosis_name]["score"])
+    unscored = [i for i in remaining if i not in scored]
+
+    order, error = list(range(len(unscored))), None
+    vignette_path = VIGNETTE_DIR / f"{state['patient_id']}_ddx_vignette_v1.md"
+    if len(unscored) > 1:
+        listed = "\n".join(f"{n}. {i.diagnosis_name}" for n, i in enumerate(unscored, 1))
+        try:
+            vignette = vignette_path.read_text(encoding="utf-8")
+            reply = get_llm().with_structured_output(LikelihoodOrder).invoke(
+                f"Clinical vignette:\n{vignette}\n\n"
+                f"Differential diagnoses still open for this patient:\n{listed}\n\n"
+                "Rank these diagnoses by how likely each is to be this patient's diagnosis, given "
+                "the vignette — most likely first. Return every number once, in that order."
+            )
+            picked = list(dict.fromkeys(n - 1 for n in reply.order if 1 <= n <= len(unscored)))
+            order = picked + [n for n in range(len(unscored)) if n not in picked]
+        except Exception as e:
+            error = str(e)
+
+    ranked = scored + [unscored[n] for n in order]
+    records = []
+    for rank, item in enumerate(ranked, 1):
+        s = scores.get(item.diagnosis_name, {})
+        records.append({
+            "rank": rank, "diagnosis_name": item.diagnosis_name, "status": item.status,
+            "method": "score" if item in scored else "llm",
+            "score": s.get("score", 0.0), "has_criteria": s.get("has_criteria", False),
+            "supported_weight": s.get("supported_weight", 0.0),
+            "supported_count": s.get("supported_count", 0), "criteria_count": s.get("criteria_count", 0),
+            "supported": s.get("supported", []),
+        })
+    if error:
+        records.append({"llm_ranking_error": error})
+    return ranked, records
+
+
 def aggregate(state: Module3State) -> dict:
     """Collect both fan-ins and write the run's criteria log, refined DDx list, gap list, and
     verification log — the last being how each judgement was reached rather than what it was.
@@ -747,12 +1119,25 @@ def aggregate(state: Module3State) -> dict:
     They are a different kind of answer from the ones still open: nothing about them is left to
     work up, and mixing them into the list a clinician reads for what to do next buries the
     diagnoses that still need something. Both files are written on every run, empty if need be.
+    The ones filter_by_medication removed never reached verification, so they are not here; that
+    node wrote their file already.
+
+    03_final_ddx_list.json is written in rank order (see _rank_final), and 08_ranking.json records
+    each diagnosis's rank, score, the supported criteria the score sums and whether the rank came
+    from the score or from the model.
     """
     run_dir = Path(state["run_dir"])
     refined = state.get("refined_ddx") or []
     gaps = state.get("workup_gaps") or []
     declined = [item for item in refined if item.status == "declined"]
-    remaining = [item for item in refined if item.status != "declined"]
+    # Fan-in order is whichever branch finished first; restore the merged order before ranking, so
+    # ties and the model's fallback order are deterministic.
+    merged_order = {i.diagnosis_name: n for n, i in enumerate(state.get("prelim_ddx_list") or [])}
+    remaining = sorted(
+        (item for item in refined if item.status != "declined"),
+        key=lambda i: merged_order.get(i.diagnosis_name, len(merged_order)),
+    )
+    remaining, ranking = _rank_final(state, remaining)
 
     _write_json(run_dir / "02_criteria_log.json", state.get("criteria_log") or [])
     _write_json(run_dir / "03_final_ddx_list.json", [i.model_dump() for i in remaining])
@@ -760,6 +1145,7 @@ def aggregate(state: Module3State) -> dict:
     _write_json(run_dir / "04_workup_gaps.json", [g.model_dump() for g in gaps])
     _write_json(run_dir / "05_branch_errors.json", state.get("branch_errors") or [])
     _write_json(run_dir / "06_verification_log.json", state.get("verification_log") or [])
+    _write_json(run_dir / "08_ranking.json", ranking)
 
     return {
         "final_ddx_list": remaining,
@@ -786,10 +1172,14 @@ verify_ddx = verification_graph.compile()
 graph = StateGraph(Module3State)
 graph.add_node("merge_prelim_ddx", merge_prelim_ddx)
 graph.add_node("verify_ddx", verify_ddx)
+graph.add_node("filter_by_medication", filter_by_medication)
 graph.add_node("aggregate", aggregate)
 
 graph.add_edge(START, "merge_prelim_ddx")
-graph.add_conditional_edges("merge_prelim_ddx", route_to_verification, ["verify_ddx"])
+# Between the merge and the fan-out: the filter needs the whole merged list in one call, and what
+# it removes should never cost a verification branch.
+graph.add_edge("merge_prelim_ddx", "filter_by_medication")
+graph.add_conditional_edges("filter_by_medication", route_to_verification, ["verify_ddx"])
 graph.add_edge("verify_ddx", "aggregate")
 graph.add_edge("aggregate", END)
 
