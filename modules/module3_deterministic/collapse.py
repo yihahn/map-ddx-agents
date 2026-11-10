@@ -133,8 +133,11 @@ class Organized(BaseModel):
 def _structured(model_cls: type[BaseModel], max_tokens: int) -> Callable[[str], BaseModel]:
     """One structured verdict via vLLM guided decoding (response_format json_schema) on a plain
     chat.completions request — the langchain structured-output path does not engage the grammar on
-    this server (measured). Truncated or unparseable output is retried with the same settings; a
-    transport error has already been retried by the SDK and propagates."""
+    this server (measured). The reply is streamed and the content deltas joined, so the client's
+    1200 s read timeout bounds the gap between chunks rather than the whole answer: awaited whole, a
+    29-entry organize call timed out on every attempt (PT10, 2026-11-09). Truncated or unparseable
+    output is retried with the same settings; a transport error has already been retried by the SDK
+    and propagates."""
     from .llm import get_llm
 
     llm = get_llm(max_tokens=max_tokens)
@@ -144,19 +147,26 @@ def _structured(model_cls: type[BaseModel], max_tokens: int) -> Callable[[str], 
     def invoke(prompt: str) -> BaseModel:
         last_error: Exception | None = None
         for _ in range(1 + CALL_RETRIES):
-            response = llm.root_client.chat.completions.create(
+            stream = llm.root_client.chat.completions.create(
                 model=llm.model_name, messages=[{"role": "user", "content": prompt}],
                 max_tokens=llm.max_tokens, temperature=llm.temperature, top_p=llm.top_p,
-                response_format=fmt)
-            choice = response.choices[0]
+                response_format=fmt, stream=True)
+            content, finish = [], None
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                choice = chunk.choices[0]
+                if choice.delta.content:
+                    content.append(choice.delta.content)
+                finish = choice.finish_reason or finish
+            text = "".join(content)
             try:
-                if choice.finish_reason == "length":
+                if finish == "length":
                     raise ValueError("finish_reason=length")
-                return model_cls.model_validate_json(choice.message.content or "")
+                return model_cls.model_validate_json(text)
             except ValueError as exc:
                 last_error = exc
-                print(f"  {model_cls.__name__}: retry after {str(exc)[:60]} "
-                      f"({response.usage.completion_tokens} tokens)", flush=True)
+                print(f"  {model_cls.__name__}: retry after {str(exc)[:60]} ({len(text)} chars)", flush=True)
         raise last_error
 
     return invoke

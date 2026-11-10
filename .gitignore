@@ -29,3 +29,9 @@ modules/module3_deterministic/output_keyword_matching/
 reports/
 # Batch run logs — patient DDx names and verdicts, local only
 batch_logs/
+
+# Narrative step outputs — patient-derived, local only
+modules/narrative/output/
+
+# Colleague evaluation material and patient reports — local only
+evaluation_colleague_works/
