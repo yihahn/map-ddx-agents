@@ -1,0 +1,105 @@
+Below is the text of {출처 문서}, chosen as the best available guideline or paper on diagnosing '{진단명}'.
+
+Read the whole text and work out which findings a clinician uses to establish {진단명}: the key diagnostic findings that a test, an examination or the documented history can check, and that point to this diagnosis rather than merely being compatible with it — a confirmatory test result, a defined threshold, a characteristic imaging or histological finding, a required exposure, a required exclusion of other causes. Write them in your own words as a short list. Do not copy sentences from the source, but keep the strength of its wording: what the source requires stays required, and what it calls typical, suggestive or 'less likely' is not turned into a requirement ('makes the diagnosis less likely' does not become 'absent').
+
+What the list must contain:
+
+- The reference-standard or confirmatory test, whenever the source names one (biopsy, culture, PCR, a definitive imaging sign), even if it is rarely done.
+
+- The route by which most patients are actually diagnosed, when that differs from the definitive one — for example compatible imaging lesions when the definitive sign is usually absent, or IgM alongside IgG serology.
+
+- When the source requires that other causes be ruled out — it calls the condition a diagnosis of exclusion or says other causes must be excluded — one item per test or record that does the excluding, naming what it must not show ('Viral hepatitis serology: negative for acute hepatitis A, B, C and E').
+
+How to write each item:
+
+- One item per test or examination. Each item names the test and the result that counts, with the source's threshold if it gives one: 'CSF cell count: eosinophils > 10%', 'Cardiac MRI T2-weighted imaging or T2 mapping: increased myocardial T2 signal'. An item states the finding only — no comments about the source or about how sensitive or reliable the test is.
+
+- Every number, threshold or value in an item must be stated in the source text, with its conditions exactly as the source gives them. Do not add values from your own knowledge; without one in the source, describe the result without a number. When the source does give a number for a finding, the item must include it ('PT INR >= 1.5', 'ALT >= 5 x ULN') — never replace it with 'abnormal', 'elevated' or 'prolonged'.
+
+- Keep the full range of results the source accepts. Do not narrow a finding to its typical form when the source allows others (a rash 'typically salmon-pink, but other rashes may be consistent' is 'transient rash with the fever spikes', not 'salmon-pink rash'), and list all the patterns the source accepts for an imaging finding.
+
+- Do not turn a typical course, a usual time window or a reference figure into a required condition. 'Symptoms usually begin 10-24 h after ingestion' or 'toxic dose: 0.5 mg/kg' describe the condition; they are not thresholds a patient must meet.
+
+- When subtypes are diagnosed by different tests, keep one item per subtype and name the subtype in it. An item that belongs to one subtype, stage or certainty level (definite, probable, possible) only is sufficient, specific or nonspecific, never necessary or exclusion: a patient can have the condition without meeting it.
+
+- Keep what the source names as it names it — exposures, animals, drugs, organisms, sites. Do not replace a list with a broader term ('cattle, sheep, goats or parturient cats' does not become 'contact with animals'; 'busulfan or cyclophosphamide' does not become 'a causative agent').
+
+- Versions and sets: when the source gives several revisions of the same criteria set (same name, different years), use only the most recent revision and ignore the older columns or rows. When the source gives several different criteria sets for the same condition (different authors or bodies, different items — Yamaguchi and Fautrel for adult Still's disease, ISG and ICBD for Behçet's disease), keep every set: list the items of each, and write the rules of each set separately, labelled with the set's name.
+
+Combination criteria and alternatives:
+
+- Still list every finding as its own item, as described above. Do NOT drop the rule that combines them: put it in the separate "rules" list of the output, referring to items only by their ids. No item text may mention other items or how many of them are needed.
+
+- Alternatives ('A or B', 'any one of the following'): one item per alternative, plus a combo rule with one group holding their ids and m = 1. The one exception is unchanged: when the source requires at least one of the alternatives for the condition as a whole, so that the diagnosis cannot be made without one of them, keep them in one item joined with 'or' and mark that item necessary (drug-induced liver injury defined as 'any one of the following: ALT > 5 x ULN …; bilirubin > 2.5 mg/dl …; INR > 1.5 …' is one item).
+
+- 'X and at least m of the following': X is a necessary item; the set becomes a combo rule with one group holding the item ids and m.
+
+- Major and minor criteria: a major criterion is specific, a minor criterion nonspecific, and a criterion the source calls absolute or definitive is sufficient. Every combination the source states (definitive, probable, possible, ...) becomes one combo rule carrying the source's label. A combo rule holds one group per set of criteria the source counts separately, each group with its item ids and the minimum number m the source requires from that group; the rule is met only when every group reaches its m. 'Two major neuroimaging criteria plus any clinical/exposure criteria' is two groups: {major neuroimaging items, m = 2} and {clinical/exposure items, m = 1}. 'One major neuroimaging criterion plus two clinical/exposure criteria with the exclusion of other pathologies' is three groups, the last being {the exclusion item, m = 1}. Never merge groups the source counts separately into one pool — a pool loses the count per group. When the source offers several alternative combinations for the same label (definitive by route 1, by route 2, ...), write one combo rule per route with the same label. A sentence that states a requirement common to all routes ('at least one major neuroimaging criterion is always required') is a combo rule of its own with that sentence as source.
+
+- Points scores (each finding adds or subtracts points and a total decides, as in RegiSCAR or RUCAM): every scored finding is one item, specific or nonspecific. The rule of type "score" records, for each item id, the points the source gives and the condition for each points value, and the cut-offs with the labels the source attaches to them. Keep the points and cut-offs; do not leave them out. If the source gives separate score tables for subtypes (for example hepatocellular versus cholestatic or mixed injury), make one score rule per subtype and name the subtype in the rule.
+
+- When a scored item asks whether other causes have been ruled out (RUCAM 'Search for alternative causes', or any item scored by how many listed causes were excluded), do not write it as one item: write one exclusion item per cause the source lists, each naming the test and the negative result that excludes it (as the exclusion category below requires), and in the score rule give the points for that scored item under a key named for the scored item, with each points condition stated as the count of those exclusion items that are met (for example 'all 7 group I causes and group II causes ruled out: +2', '7 group I causes ruled out: +1'). Each exclusion item keeps its own category "exclusion" even though it feeds a score.
+
+- A condition the source states as a gate for applying the score or the criteria set ('excludes cases with ...', 'applies only when ...', 'cases with ... should not be assessed') is a necessary item, not a scored item. Write such a gate item in the source's own words (quote the sentence, trimmed to the condition), so that its strength is kept exactly.
+
+- In a points score, every row of the score table that describes a distinct finding is its own item (age >= 55 years and age < 55 years are two rows of one finding, "age", so one item; but time to onset, course after cessation, alcohol use, concomitant drug and previous hepatotoxicity are different findings and stay separate items). Never fold the points conditions of one finding into the item text as a list of alternatives: the item states the finding with its main threshold ('Time to onset from the start of the drug: 5-90 days'), and the rule holds the other conditions and their points.
+
+- Each rule carries the sentence or table row of the source it was built from.
+
+Do not include:
+
+- findings shared by many conditions (fever, fatigue, leukocytosis, a raised CRP) unless the source makes them part of a formal criterion or case definition;
+
+- descriptions of what is typical, common or possible ('most patients have', 'may show', percentages, sensitivities, predictive values);
+
+- epidemiology, risk factors, prognosis, treatment, and staging or severity grading;
+
+- a monitoring threshold or result from a single study rather than the source's own diagnostic approach;
+
+- findings that would point to another disease, except as the exclusion items above;
+
+- the test results of the patients a case report or case series describes, and the inclusion or exclusion criteria of a study's population ('HIV-negative' in a study of HIV-negative patients) — they describe those patients, not the condition;
+
+- instructions on when or how to perform a test, and descriptions of how a test or assay works — an item says what result in the patient counts toward the diagnosis.
+
+Never list the same finding twice. Leave the list empty if the source states no specific diagnostic findings.
+
+For every item, checkable_by names the record that would settle it — a lab analyte, an imaging study, a vital sign, a documented history detail. Name the record, not the finding. If several records could settle one item, name them all in one checkable_by separated by commas. Drop any item you cannot name a record for.
+
+For every item, category says what role it plays in making the diagnosis. The categories:
+
+- precondition: a history, exposure or patient state the patient must have for these criteria to apply at all; without it this set of criteria is not used — the suspected drug was taken, the parasite's host was eaten, haematopoietic stem cell transplantation, exposure to extreme heat or cold. Residence in or travel to an endemic area, or any other exposure, is a precondition only when the source says the criteria apply only to patients with it; an exposure the source counts as supporting the diagnosis without requiring it is specific.
+
+- sufficient: a finding that on its own establishes the diagnosis — histology on biopsy, direct demonstration of the pathogen (culture, PCR, larvae in CSF). The source signals it with words such as definite, establishes the diagnosis, diagnostic of, absolute criterion, reference standard, gold standard. Write it as the positive result that establishes the diagnosis. A test that confirms the diagnosis only in a patient who also has a compatible clinical syndrome or other findings (an antibody that is diagnostic 'in a patient with a typical demyelinating event', serology that confirms 'with compatible clinical features') is specific, not sufficient.
+
+- exclusion: a criterion that other conditions be absent, used only when the source requires that other causes be ruled out — the diagnosis is made only once they are (for drug-induced liver injury: viral hepatitis serology negative, autoimmune serology negative, ultrasound without biliary obstruction). One item per test that does the excluding. A statement that a finding makes the diagnosis less likely, that another cause is more likely, that a condition can mimic or overlap with it, or a list of differential diagnoses is not an exclusion criterion.
+
+- necessary: a finding the source requires, with words such as must, required, is needed, in the presence of, for the condition as a whole, so that the diagnosis cannot be made at all without it. Not necessary: a finding the source introduces with suspected when, e.g., such as, typically, usually, often or if available; a finding required only for one subtype, stage or certainty level; and a separate alternative or a component of a set (see combination criteria above).
+
+- specific: a finding that, when present, greatly raises the likelihood of this diagnosis because it is uncommon in the conditions this diagnosis is usually confused with — a disease-specific antibody, a characteristic imaging finding, improvement after the suspected drug is stopped, response to a disease-specific treatment.
+
+- nonspecific: a finding that the conditions this diagnosis is usually confused with commonly share — headache, fever, seizures.
+
+Decide each item's category by asking these questions in order and taking the first answered yes:
+
+1. Is it a precondition for applying this set of criteria at all? -> precondition
+
+2. Does meeting this one item alone, without any other finding, establish the diagnosis? -> sufficient
+
+3. Does the source require that other causes be ruled out, and does this item do the excluding? -> exclusion
+
+4. Does the source require it for the condition as a whole — not for one subtype, stage or certainty level, and not as an item of a points score — so that the diagnosis cannot be made without it? -> necessary
+
+5. Is it uncommon in the conditions this diagnosis is usually confused with? -> specific; otherwise -> nonspecific
+
+Source text:
+
+{원문 텍스트}
+
+Answer as JSON only, in this form:
+{"items": [{"id": "I1", "item": <finding as one sentence>, "category": "precondition|sufficient|exclusion|necessary|specific|nonspecific", "checkable_by": <record>}],
+ "rules": [{"id": "R1", "type": "combo|score", "label": <the source's name for the rule, grade or route>, "subtype": <subtype the rule applies to, or null>,
+            "groups": [{"name": <what the source calls this set of criteria>, "items": [<item ids>], "m": <minimum number of items from this group>}],
+            "points": {<item id or scored-item name>: [{"condition": <when this points value applies>, "points": <number>}]}, "cutoffs": [{"label": <grade>, "min": <number or null>, "max": <number or null>}], "gate": [<item ids that must hold before the rule is applied>],
+            "source": <sentence or table row quoted from the source>}]}
+A combo rule is met when every one of its groups has at least m of its items met; it uses "groups" and sets "points", "cutoffs" and "gate" to null. A score rule uses "points", "cutoffs" and "gate" and sets "groups" to null.

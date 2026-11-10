@@ -20,6 +20,10 @@ modules/module2_deterministic/output/
 modules/module3_deterministic/output/
 modules/module3_deterministic/exp_output/
 modules/module3_deterministic/output_keyword_matching/
+# 파이프라인 실행 로그·재정렬/재판정 결과(run_logs_MMDD/) — 환자 진단명·EMR 인용 포함, 로컬 보관 전용
+run_logs_*/
 
 # 환자 데이터 기반 리포트 — 로컬 보관 전용
 reports/
+
+map_real_emr/

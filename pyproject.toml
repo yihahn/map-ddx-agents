@@ -10,6 +10,7 @@ dependencies = [
     "langchain-openai>=1.5.1",
     "langfuse>=4.14.4",
     "langgraph>=1.2.11",
+    "pypdf>=6.21.2",
     "python-dotenv>=1.2.3",
     "sentence-transformers>=5.7.0",
 ]

@@ -43,7 +43,7 @@ BROWSER_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Ge
 # cannot pick them even when nothing better is listed. Professional references — Merck Manual
 # Professional and StatPearls — are allowed; the Merck/MSD consumer editions are not.
 EXCLUDED_DOMAINS = (
-    "wikipedia.org", "medscape.com", "mayoclinic.org", "clevelandclinic.org", "webmd.com",
+    "wikipedia.org", "medscape.com", "medscape.org", "mayoclinic.org", "clevelandclinic.org", "webmd.com",
     "healthline.com", "droracle.ai", "youtube.com", "reddit.com", "quizlet.com", "verywellhealth.com",
     "fpnotebook.com",
 )
@@ -157,7 +157,9 @@ def _rank(diagnosis_name: str, results: list[dict]) -> list[tuple[int, str]]:
         "that only discusses diagnosis or management. "
         "Leave out general encyclopaedias, consumer or patient editions, Q&A and AI-answer sites, "
         "personal or point-of-care note sites, blogs, news, patient information pages, "
-        "laboratory-methods papers, and results about a different condition. Return an empty "
+        "laboratory-methods papers, case reports and case series, original studies of a patient "
+        "group that do not propose or validate diagnostic criteria, and results about a "
+        "different condition. Return an empty "
         "list if none qualify.\n"
         "For each result give its number, its kind ('guideline' for a society or government "
         "guideline or consensus statement, 'criteria_paper', 'review', or 'reference' for a "
@@ -256,16 +258,31 @@ def _page_text(url: str, title: str = "") -> tuple[str, str]:
 
 
 def find_criteria(
-    diagnosis_name: str, extract: Callable[[str, str], list], kinds: set[str] | None = None
+    diagnosis_name: str, extract: Callable[[str, str], list], kinds: set[str] | None = None,
+    trail: dict | None = None, label: str = "DuckDuckGo",
 ) -> tuple[list, str | None, str]:
     """(criteria, source_doc, detail) from the first ranked result extract() finds criteria in.
 
-    kinds limits the search to results the ranking gave one of those kinds ("guideline", ...)."""
+    kinds limits the search to results the ranking gave one of those kinds ("guideline", ...).
+    trail, when given, gets one entry per page this call opened to read criteria from, keyed
+    ("DuckDuckGo", url), listing what every pass (label) made of it — read and used, read without
+    criteria, or not readable. Results never opened are not recorded."""
+    sites = trail if trail is not None else {}
     try:
         record = _ranking(diagnosis_name)
     except (RuntimeError, requests.RequestException) as error:
         return [], None, f"DuckDuckGo search failed: {error}"
     results, tried, extractions = record["results"], [], 0
+
+    def attempt(index: int, kind: str | None, outcome: str, source_doc: str | None = None) -> None:
+        hit = results[index]
+        sites.setdefault(("DuckDuckGo", hit["href"]), {
+            "search": "DuckDuckGo", "query": record["query"], "result": index + 1,
+            "title": html.unescape(hit["title"]), "url": hit["href"], "kind": kind, "attempts": [],
+        })["attempts"].append(
+            {"pass": label, "outcome": outcome, **({"source_doc": source_doc} if source_doc else {})}
+        )
+
     if not record["ranked"]:
         return [], None, f"no guideline or paper among {len(results)} results for '{record['query']}'"
     for index, scope, *kind in record["ranked"][:MAX_CANDIDATES]:
@@ -277,11 +294,14 @@ def find_criteria(
         text, how = _page_text(hit["href"], hit["title"])
         if not text:
             tried.append(f"{hit['href']} ({how or 'too short'})")
+            attempt(index, kind[0] if kind else None, f"not readable: {how or 'too short'}")
             continue
         domain = urllib.parse.urlparse(hit["href"]).netloc.removeprefix("www.")
         source_doc = f"{html.unescape(hit['title'])} ({domain})"
         criteria = extract(source_doc, text)
         extractions += 1
+        attempt(index, kind[0] if kind else None,
+                "used" if criteria else "read, no criteria extracted", source_doc)
         if criteria:
             detail = (f"{hit['href']}, {scope}, {kind[0] if kind else 'unranked kind'}, via {how} — result {index + 1} of {len(results)} "
                       f"for '{record['query']}'; passed over: {'; '.join(tried) or 'none'}")
@@ -293,7 +313,7 @@ def find_criteria(
 
 
 def find_criteria_with_fallback(
-    diagnosis_name: str, extract: Callable[[str, str], list]
+    diagnosis_name: str, extract: Callable[[str, str], list], trail: dict | None = None
 ) -> tuple[list, str | None, str]:
     """(criteria, source_doc, detail) from a society guideline when either search has one, else
     from DuckDuckGo's best result, else from PubMed.
@@ -304,7 +324,9 @@ def find_criteria_with_fallback(
     while PubMed had the 2024 EULAR/PReS recommendations. Past that, the two complement each
     other: the web search reaches clinical references (Merck, imaging criteria) that PubMed's
     filter misses, and PubMed reaches full-text criteria papers when every web result is a paywall,
-    a PDF or a page without criteria. A source is extracted at most once across the passes."""
+    a PDF or a page without criteria. A source is extracted at most once across the passes.
+    trail, when given, collects every page either search opened to read criteria from and what
+    each pass made of it (see find_criteria)."""
     done: dict[str, list] = {}
 
     def once(source_doc: str, text: str) -> list:
@@ -313,11 +335,13 @@ def find_criteria_with_fallback(
         return done[source_doc]
 
     passes = (
-        ("DuckDuckGo guideline", lambda: find_criteria(diagnosis_name, once, kinds={"guideline"})),
-        ("PubMed guideline",
-         lambda: criteria_literature.find_criteria(diagnosis_name, once, guidelines_only=True)),
-        ("DuckDuckGo", lambda: find_criteria(diagnosis_name, once)),
-        ("PubMed", lambda: criteria_literature.find_criteria(diagnosis_name, once)),
+        ("DuckDuckGo guideline", lambda: find_criteria(
+            diagnosis_name, once, kinds={"guideline"}, trail=trail, label="DuckDuckGo guideline")),
+        ("PubMed guideline", lambda: criteria_literature.find_criteria(
+            diagnosis_name, once, guidelines_only=True, trail=trail, label="PubMed guideline")),
+        ("DuckDuckGo", lambda: find_criteria(diagnosis_name, once, trail=trail, label="DuckDuckGo")),
+        ("PubMed", lambda: criteria_literature.find_criteria(
+            diagnosis_name, once, trail=trail, label="PubMed")),
     )
     misses = []
     for label, run in passes:

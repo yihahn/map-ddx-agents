@@ -121,10 +121,20 @@ def _best_overlap(candidates: list[tuple[str, str]], quoted_text: str) -> str | 
     Each candidate is scored by how many characters the quote and the document text genuinely
     share, and the best match wins — taking the first document that merely overlapped attributed a
     medication row to a lab file, because a short unrelated row can sit inside a long quote.
-    Returns None when nothing overlaps by at least MIN_MATCH_CHARS, so a quote with no real source
-    is left unattributed rather than guessed.
+    A quote found whole in a document is traced to it at any length. Otherwise returns None when
+    nothing overlaps by at least MIN_MATCH_CHARS, so a quote with no real source is left
+    unattributed rather than guessed.
     """
     needle = " ".join(quoted_text.split())
+    if not needle:
+        return None
+    # The length floor is for partial overlaps, where a short shared run proves nothing. Applied to
+    # whole quotes it dropped what Korean notes state in a few characters — "발열 38.8°C (오후 4시)",
+    # "관절통 지속" — so PT05's fever and arthralgia came back unconfirmed though the verifier quoted
+    # them from the note it read (2026-10-29).
+    for doc_id, text in candidates:
+        if needle in " ".join(text.split()):
+            return doc_id
     if len(needle) < MIN_MATCH_CHARS:
         return None
 

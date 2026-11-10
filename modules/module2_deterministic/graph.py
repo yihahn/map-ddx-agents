@@ -2,7 +2,7 @@ import json
 import operator
 import re
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
@@ -25,8 +25,10 @@ from .pubmed import esearch_count, esearch_pmids, esummary
 # OR'ed together so a hit is about that term and touches the rest of the picture (every query,
 # count, title count and candidate logged -> 02), extract candidate diagnosis names from the
 # top-100 (by relevance) titles per search (capped at MAX_CANDIDATES_PER_TERM), snapshot the
-# merged pre-dedup candidates (-> 03), then dedup by BioLORD embedding similarity and save the
-# final list (-> 04).
+# merged pre-dedup candidates (-> 03), dedup by BioLORD embedding similarity, then screen the
+# deduped candidates against the full vignette in one call and drop only those the vignette shows
+# to be unrelated to this patient, each with a reason and a vignette quote code finds in the text
+# (every decision -> 05), and save the kept ones as the final list (-> 04).
 
 # How many searches the vignette is turned into: one core term each, with the terms it is
 # searched against. The model writes the whole plan rather than a flat term list that code then
@@ -78,6 +80,17 @@ class CandidateDiagnoses(BaseModel):
     diagnosis_names: list[str]
 
 
+class ScreenDecision(BaseModel):
+    number: int  # the candidate's number in the list shown
+    decision: Literal["keep", "exclude"]
+    reason: str  # why it does or does not fit this patient
+    quote: str  # for an exclusion, the vignette text it rests on, copied exactly; else empty
+
+
+class ScreenDecisions(BaseModel):
+    decisions: list[ScreenDecision]
+
+
 class Module2State(dict):
     vignette: str
     patient_id: str
@@ -86,6 +99,7 @@ class Module2State(dict):
     patient_description: str
     search_log: Annotated[list[dict], operator.add]
     new_ddx: Annotated[list[DDxItem], operator.add]
+    deduped_ddx: list[DDxItem]
     final_ddx_list: list[DDxItem]
     output_path: str
 
@@ -311,28 +325,97 @@ def aggregate(state: Module2State) -> dict:
       (pre-dedup candidates) for auditing
     - dedup new_ddx by diagnosis-name BioLORD cosine similarity (>0.85 -> merge)
     - on merge: evidence lists concatenated, source_detail joined with " | "
-    - writes the deduped list to run_dir/04_final_ddx_list.json
+    - the deduped list goes on to screen_by_vignette, which writes the final list
     """
     run_dir = Path(state["run_dir"])
     _write_json(run_dir / "02_search_log.json", state.get("search_log") or [])
     _write_json(run_dir / "03_new_ddx_raw.json", [i.model_dump() for i in state.get("new_ddx") or []])
 
-    merged = dedup_ddx_items(state.get("new_ddx") or [])
+    return {"deduped_ddx": dedup_ddx_items(state.get("new_ddx") or [])}
 
+
+def _in_vignette(quote: str, vignette: str) -> bool:
+    """Whether a quote is the vignette's own text, ignoring case, spacing and markdown marks."""
+    norm = lambda t: re.sub(r"\s+", " ", re.sub(r"[*_`#>|]", " ", t)).strip().lower()
+    q = norm(quote)
+    return len(q) >= 8 and q in norm(vignette)
+
+
+def screen_by_vignette(state: Module2State) -> dict:
+    """Drop the candidates the vignette shows have nothing to do with this patient.
+
+    The candidate step reads case-report titles against a description built from the search terms
+    alone — who the patient is and the findings searched for — so a disease named in a title can
+    pass it while the vignette says the patient cannot have it: ruled out by a test, of the wrong
+    age or sex, contradicted by a documented finding, or no explanation of the illness at all. Here
+    every deduped candidate is read against the whole vignette in one call. A candidate is dropped
+    only with a reason and a quote from the vignette that code finds in the vignette's text; one
+    the model drops on a quote the vignette does not contain, on no quote, or that it leaves out of
+    its answer is kept, and a failed call keeps them all — a wrongly kept candidate costs Module 3
+    one check, a wrongly dropped one is lost for good.
+
+    - writes every decision to run_dir/05_vignette_screen.json and the kept candidates to
+      run_dir/04_final_ddx_list.json
+    """
+    run_dir = Path(state["run_dir"])
+    candidates: list[DDxItem] = state.get("deduped_ddx") or []
+    vignette = state["vignette"]
+    decisions: dict[int, ScreenDecision] = {}
+    error = None
+    if candidates:
+        listed = "\n".join(f"{n}. {c.diagnosis_name}" for n, c in enumerate(candidates, 1))
+        try:
+            reply = get_llm().with_structured_output(ScreenDecisions).invoke(
+                "Below are candidate differential diagnoses found in PubMed case reports for the "
+                "patient in this clinical vignette. Decide for each one whether to keep it as a "
+                "candidate for this patient.\n"
+                "Exclude a candidate only when the vignette shows it is unrelated to this patient: "
+                "the vignette rules it out (a test, an imaging study or the course excludes it, or "
+                "it was considered and abandoned), the patient's age or sex makes it impossible, a "
+                "documented finding contradicts what the diagnosis requires, or it cannot explain "
+                "any part of the present illness. For an exclusion, give the reason and copy into "
+                "quote the exact vignette text it rests on.\n"
+                "Keep every other candidate — one that fits, one that fits part of the picture, and "
+                "one the vignette simply does not address. Being less likely than another candidate "
+                "is not a reason to exclude it. When unsure, keep it, and leave quote empty.\n"
+                "Return one decision per numbered candidate.\n\n"
+                f"Vignette:\n{vignette}\n\nCandidates:\n{listed}"
+            )
+            decisions = {d.number: d for d in reply.decisions if 1 <= d.number <= len(candidates)}
+        except Exception as exc:  # keep everything rather than lose a module's output
+            error = f"{type(exc).__name__}: {exc}"
+
+    kept, record = [], []
+    for n, item in enumerate(candidates, 1):
+        d = decisions.get(n)
+        traced = d is not None and d.decision == "exclude" and _in_vignette(d.quote, vignette)
+        outcome = "excluded" if traced else "kept"
+        note = (None if d is None else
+                "exclusion withdrawn: quote not found in the vignette" if d.decision == "exclude" and not traced
+                else None)
+        record.append({"diagnosis_name": item.diagnosis_name, "outcome": outcome,
+                       "model_decision": d.decision if d else None, "reason": d.reason if d else None,
+                       "quote": d.quote if d else None, "note": note or ("not in the model's answer" if d is None and not error else None)})
+        if not traced:
+            kept.append(item)
+
+    _write_json(run_dir / "05_vignette_screen.json",
+                {"error": error, "kept": len(kept), "excluded": len(candidates) - len(kept), "decisions": record})
     output_path = run_dir / "04_final_ddx_list.json"
-    _write_json(output_path, [item.model_dump() for item in merged])
-
-    return {"final_ddx_list": merged, "output_path": str(output_path)}
+    _write_json(output_path, [item.model_dump() for item in kept])
+    return {"final_ddx_list": kept, "output_path": str(output_path)}
 
 
 graph = StateGraph(Module2State)
 graph.add_node("plan_searches", plan_searches)
 graph.add_node("search_case_reports", search_case_reports)
 graph.add_node("aggregate", aggregate)
+graph.add_node("screen_by_vignette", screen_by_vignette)
 
 graph.add_edge(START, "plan_searches")
 graph.add_conditional_edges("plan_searches", route_to_search, ["search_case_reports"])
 graph.add_edge("search_case_reports", "aggregate")
-graph.add_edge("aggregate", END)
+graph.add_edge("aggregate", "screen_by_vignette")
+graph.add_edge("screen_by_vignette", END)
 
 module2_app = graph.compile()

@@ -1,5 +1,4 @@
 import json
-import math
 import operator
 import os
 import re
@@ -12,7 +11,7 @@ from pydantic import BaseModel
 
 from schema import DDxItem, Evidence, WorkupGap
 
-from . import criteria_literature, criteria_web
+from . import criteria_ddx, criteria_extract, criteria_literature, criteria_web
 from .criteria import fetch_reference_text
 from .embed import group_by_similarity
 from .emr import TOP_K, attribute_doc, load_document, rank_documents
@@ -25,13 +24,13 @@ from .medication import find_exposure_mentions, load_medications
 # written under run_dir for auditing. Algorithm: mirrors spec_docs/module3_deterministic.md — merge
 # the two lists by exact diagnosis name (-> 01), drop the diagnoses named after a drug the record
 # never mentions (-> 07), then Send one verification subgraph per remaining diagnosis
-# that finds weighted diagnostic criteria (a guideline or reference found through DuckDuckGo or
+# that finds categorized diagnostic criteria (a guideline or reference found through DuckDuckGo or
 # PubMed; Merck/StatPearls under MODULE3_CRITERIA_SOURCE=reference), checks each criterion against
 # the EMR by walking that criterion's ranked documents (a refutation counts only if a second call
 # reading the same record confirms it), and splits the outcome into a deterministic
-# status rule, a score (summed weight of supported criteria) and a workup-gap record; aggregate
+# status rule by criterion category, a rank key and a workup-gap record; aggregate
 # collects the fan-ins, sends the diagnoses the record ruled out to their own decline_ddx_list.json,
-# and ranks the rest by score, then by an LLM reading of the vignette (-> 02-06, 08). Every
+# and ranks the rest by rank key, then by an LLM reading of the vignette (-> 02-06, 08). Every
 # judgement is recorded with the EMR document it traces back to and with the ordered list of lookups
 # the loop made (-> 06), so a run says not just what it concluded but how much of the record it read
 # to get there. The per-diagnosis fields live in a subgraph state, not Module3State, because
@@ -65,11 +64,21 @@ MIN_QUERY_SCORE = 0.30
 # Which backend judges criteria against the EMR. This node makes the judgement the whole module
 # turns on, so it is the one worth pointing at a different model; every other node just reads prose.
 VERIFIER_BACKEND = os.environ.get("MODULE3_VERIFIER_BACKEND", DEFAULT_BACKEND)
-# Where diagnostic criteria come from. "web" (the default since v3) searches DuckDuckGo and PubMed
-# for a society guideline first, then the best other source, and extracts weighted key findings
-# (criteria_web / criteria_literature). "reference" is the earlier Merck-then-StatPearls scrape with
-# its verbatim-statement prompt, kept so the runs behind the v1/v2 reports can be reproduced.
-CRITERIA_SOURCE = os.environ.get("MODULE3_CRITERIA_SOURCE", "web")
+# Where diagnostic criteria come from. "ddx" (the default since 2026-10-27) takes the open-access
+# papers ddxcriteria_sources fetches from PubMed and Europe PMC and falls back to the DuckDuckGo
+# search when it asks for one (criteria_ddx). "web" (the default from v3) searches DuckDuckGo and
+# PubMed for a society guideline first, then the best other source (criteria_web /
+# criteria_literature). Both extract the same categorized key findings. "reference" is the earlier
+# Merck-then-StatPearls scrape with its verbatim-statement prompt, kept so the runs behind the
+# v1/v2 reports can be reproduced; "web" is kept for the runs up to 2026-10-16.
+CRITERIA_SOURCE = os.environ.get("MODULE3_CRITERIA_SOURCE", "ddx")
+# The criterion categories whose refutation declines a diagnosis (see determine_status): without a
+# precondition the criteria do not apply, and without a necessary finding the diagnosis cannot be
+# made. A refuted exclusion criterion (another cause shown) no longer declines (2026-10-27): it keeps
+# the diagnosis from "supported" and leaves it pending.
+DECLINING_CATEGORIES = ("precondition", "necessary")
+# The categories that must all be supported, where they apply to the patient, for "supported".
+CORE_CATEGORIES = ("precondition", "necessary", "exclusion")
 OUTPUT_DIR = Path(__file__).parent / "output"
 VIGNETTE_DIR = Path(__file__).resolve().parents[2] / "pending_diag" / "ddx_vignette"
 
@@ -92,7 +101,19 @@ class Criterion(BaseModel):
     text: str
     source_doc: str
     checkable_by: str  # the record that would settle this item, from ParsedCriterion
-    weight: float = 0.0  # share of the diagnosis this finding carries; a diagnosis's weights sum to 1
+    # The role this item plays (criteria_literature.CATEGORIES), which decides what a refutation of
+    # it does in determine_status. The Merck/StatPearls path has no categories; "necessary" keeps
+    # its rule as it was, every refutation declining.
+    category: str = "necessary"
+    # The item's id in its extraction (criteria_extract), which that extraction's combo and score
+    # rules refer to; empty on the Merck/StatPearls path, which has no rules.
+    item_id: str = ""
+    # The tests that must all have been completed, contradicting the item, before the record can
+    # show it absent (criteria_extract); a refutation stands only once every one has (verify_with_emr).
+    refute_requires: list[str] = []
+    # "whole", or the subtype this item applies to (criteria_extract); its category is its role
+    # within that scope, and determine_status judges each subtype apart from the condition as a whole.
+    scope: str = "whole"
 
 
 # What the parser returns. checkable_by is not documentation — it is the filter: a criterion whose
@@ -113,7 +134,10 @@ class ParsedCriteria(BaseModel):
 class CriterionVerification(BaseModel):
     criterion: str
     content: str
-    judgement: Literal["supported", "refuted", "unconfirmed"]
+    # not_applicable: the criterion is for a subtype, pattern, drug or situation the record shows
+    # this patient does not have (a cholestatic-injury criterion in hepatocellular injury, an HLA
+    # allele tied to a drug the patient never took); it counts neither way and is not a workup gap.
+    judgement: Literal["supported", "refuted", "unconfirmed", "not_applicable"]
 
 
 class WorkupItem(BaseModel):
@@ -134,6 +158,11 @@ class AttributedVerification(CriterionVerification):
     source: Optional[str] = None  # EMR form the quote was traced to, None when it traces to none
     date: Optional[str] = None    # that document's date, same None rule
     history: list[str] = []       # every EMR document this criterion was checked against, in order
+    # Why an unconfirmed judgement was left so on purpose: "direction_only" (the criterion gives
+    # only a direction — raised, reduced — and no number, so it neither supports nor rules out; it
+    # has no power to exclude), or "partial_refutation: ..." (the record contradicted it, but not
+    # with every test refute_requires names completed).
+    flag: Optional[str] = None
 
 
 class VerificationRecord(BaseModel):
@@ -170,6 +199,7 @@ class DDxVerificationState(dict):
     verify_run_dir: str
     ddx_item: DDxItem
     criteria: Optional[list[Criterion]] = None
+    rules: Optional[list[dict]] = None  # the combo and score rules over the criteria's item ids
     verification_result: Optional[VerificationRecord] = None
     criteria_log: Annotated[list[dict], operator.add]
     verification_log: Annotated[list[dict], operator.add]
@@ -292,7 +322,7 @@ def fetch_criteria(state: dict) -> dict:
 
     This is the "reference" source. The default "web" source is _fetch_web_criteria below.
     """
-    if CRITERIA_SOURCE == "web":
+    if CRITERIA_SOURCE in ("ddx", "web"):
         return _fetch_web_criteria(state)
     ddx_item: DDxItem = state["ddx_item"]
     raw_text, source_doc, detail = fetch_reference_text(ddx_item.diagnosis_name)
@@ -355,11 +385,16 @@ def fetch_criteria(state: dict) -> dict:
 
 def _fetch_web_criteria(state: dict) -> dict:
     """
-    - find a source and its criteria with criteria_web.find_criteria_with_fallback: a society
-      guideline from DuckDuckGo or PubMed first, then DuckDuckGo's best other result, then PubMed's
-    - each source is read with criteria_literature.criteria_prompt, which asks for the key findings
-      in the model's own words, one per test, and a weight per finding; the weights are rescaled to
-      sum to exactly 1, since the model's arithmetic is not relied on
+    - find a source and its criteria with criteria_ddx.find_criteria ("ddx"): the open-access papers
+      ddxcriteria_sources fetches, with the DuckDuckGo search where it asks for a web search; or
+      with criteria_web.find_criteria_with_fallback ("web"): a society guideline from DuckDuckGo or
+      PubMed first, then DuckDuckGo's best other result, then PubMed's
+    - each source is read with criteria_extract.extract_best (the v3 prompt, two runs, the finer
+      kept), which asks for the key findings in the model's own words, one per test, each in one
+      category (precondition, sufficient, exclusion, necessary, specific, nonspecific) that
+      determine_status reads, with the tests needed to rule each out (refute_requires) and the
+      combination and points rules over them; on "ddx" a newer version of a criteria set the source
+      names is merged in from the fetched paper that states it (criteria_ddx)
     - the prompt was settled over six rounds on nine diagnoses (2026-10-07/08); its rules are the
       fixes for what each round got wrong — combination rules listed as items, superseded criteria
       versions, findings narrowed to their typical form, missing exclusions and reference tests
@@ -367,33 +402,66 @@ def _fetch_web_criteria(state: dict) -> dict:
     - returns {"criteria": [...], "criteria_log": [dict]}
     """
     ddx_item: DDxItem = state["ddx_item"]
-    parser = get_llm().with_structured_output(criteria_literature.WeightedCriteria)
+    # Every source read, with what the extraction made of it; the rules of the one used are logged.
+    extractions: dict[str, criteria_extract.Extraction] = {}
 
     def extract(source_doc: str, text: str) -> list:
-        parsed = parser.invoke(
-            criteria_literature.criteria_prompt(ddx_item.diagnosis_name, source_doc, text)
-        )
-        return criteria_literature.normalize_weights(parsed.criteria) if parsed.criteria else []
+        extractions[source_doc] = criteria_extract.extract_best(ddx_item.diagnosis_name, source_doc, text)
+        return extractions[source_doc].items
 
+    sites: dict = {}
+    used = None
     try:
-        found, source_doc, detail = criteria_web.find_criteria_with_fallback(
-            ddx_item.diagnosis_name, extract
-        )
+        if CRITERIA_SOURCE == "ddx":
+            used, source_doc, detail, extractions = criteria_ddx.find_criteria(ddx_item.diagnosis_name, trail=sites)
+            found = used.items if used else []
+        else:
+            found, source_doc, detail = criteria_web.find_criteria_with_fallback(
+                ddx_item.diagnosis_name, extract, trail=sites)
+            used = extractions.get(source_doc)
     except Exception as error:  # a failed search or call leaves this diagnosis unverified, not the run
         found, source_doc, detail = [], None, f"criteria search failed: {error}"
+    # Every page opened to read criteria from, with what each pass made of it — the ones that
+    # yielded nothing or could not be read included, so the log shows where the criteria were
+    # looked for and not only where they were found.
+    sources_checked = [
+        {**site, "final_outcome": site["attempts"][-1]["outcome"]} for site in sites.values()
+    ]
     criteria = [
-        Criterion(text=c.text, source_doc=source_doc, checkable_by=c.checkable_by, weight=c.weight)
+        Criterion(
+            text=c.text, source_doc=source_doc, checkable_by=c.checkable_by, category=c.category,
+            item_id=c.id, refute_requires=c.refute_requires, scope=c.scope,
+        )
         for c in found
     ]
+    # Every node after this one keys a criterion by its text, and a points score repeats the same
+    # finding in each subtype's table (RUCAM: "HAV excluded" under hepatocellular and under
+    # cholestatic injury), so a repeated text would merge two criteria into one judgement and one
+    # scope. Such a repeat is told apart by its subtype's name.
+    seen_texts: dict[str, int] = {}
+    for c in criteria:
+        seen_texts[c.text] = seen_texts.get(c.text, 0) + 1
+    for c in criteria:
+        if seen_texts[c.text] > 1 and c.scope != "whole":
+            c.text = f"{c.text} ({c.scope})"
     log = {
         "diagnosis_name": ddx_item.diagnosis_name, "source_doc": source_doc,
         "detail": detail, "criteria_count": len(criteria),
         "criteria": [
-            {"text": c.text, "checkable_by": c.checkable_by, "weight": c.weight} for c in criteria
+            {"id": c.item_id, "text": c.text, "checkable_by": c.checkable_by, "category": c.category,
+             "refute_requires": c.refute_requires, "scope": c.scope}
+            for c in criteria
         ],
+        # The combination and points rules over those items (criteria_extract); determine_status
+        # ranks by its combo rules (_threshold_key), and still decides the status by category.
+        "rules": used.rules if used else [],
+        "newer_versions": used.newer_versions if used else [],
+        "merged": used.meta.get("merged", []) if used else [],
+        "extractions": {doc: e.meta for doc, e in extractions.items()},
+        "sources_checked": sources_checked,
     }
     _write_branch(state["verify_run_dir"], ddx_item.diagnosis_name, {"criteria": log})
-    return {"criteria": criteria, "criteria_log": [log]}
+    return {"criteria": criteria, "rules": log["rules"], "criteria_log": [log]}
 
 
 def _rank_for(patient_id: str, diagnosis_name: str, criterion: Criterion) -> list[tuple]:
@@ -423,8 +491,14 @@ def _rank_for(patient_id: str, diagnosis_name: str, criterion: Criterion) -> lis
 
 class DocJudgement(BaseModel):
     criterion_number: int
-    judgement: Literal["supported", "refuted", "unconfirmed"]
+    judgement: Literal["supported", "refuted", "unconfirmed", "not_applicable"]
     quote: str  # copied from the record, empty when unconfirmed
+    # The criterion states a measurement only as raised/reduced/abnormal, with no number: judged
+    # unconfirmed whatever the record shows (2026-10-27).
+    direction_only: bool = False
+    # For a refutation: the numbers of the criterion's "tests needed to rule it out" that this
+    # record shows completed with a result contradicting it.
+    tests_completed: list[int] = []
 
 
 class DocJudgements(BaseModel):
@@ -441,7 +515,11 @@ def _judge_against_document(
     record to consult, only what this record says, and the quote it returns can be checked against
     the one text it was shown.
     """
-    listed = "\n".join(f"{i}. {c.text}" for i, c in enumerate(criteria, 1))
+    listed = "\n".join(
+        f"{i}. {c.text}" + ("\n   Tests needed to rule it out: " + "; ".join(
+            f"({n}) {t}" for n, t in enumerate(c.refute_requires, 1)) if c.refute_requires else "")
+        for i, c in enumerate(criteria, 1)
+    )
     try:
         return get_llm(backend=VERIFIER_BACKEND).with_structured_output(DocJudgements).invoke(
             f"Patient record {doc_id}:\n{doc_text[:MAX_DOCUMENT_CHARS]}\n\n"
@@ -460,11 +538,46 @@ def _judge_against_document(
             "names contrast) is 'unconfirmed', not 'refuted'.\n"
             "- When the criterion lists alternatives ('A or B'), it is supported by any one of them "
             "and refuted only if the record rules out every one.\n"
+            "- A finding the record shows is not refuted by how the record words it. When the "
+            "record describes the finding the criterion names with a different qualifier — its "
+            "distribution, extent or pattern ('confluent' where the criterion says 'scattered', "
+            "'bilateral' where it says 'multifocal') — judge it supported or unconfirmed, never "
+            "refuted: refute only when the record shows the finding absent or a value outside "
+            "the criterion's threshold.\n"
+            "- A negative result from one site or specimen does not refute a finding that could be "
+            "shown at another, unless the criterion names that site: a skin biopsy without "
+            "vasculitis does not refute vasculitis on a kidney biopsy, and a negative sputum "
+            "culture does not refute a positive blood culture.\n"
             "- The quote must be about the same finding or test the criterion names. A different "
             "test, a different pathogen, a plan, or a statement of what cannot yet be concluded "
             "neither supports nor refutes it.\n"
-            "quote must be text copied from the record above, and only for supported or refuted. "
-            "Leave quote empty for unconfirmed. Never write a value the record does not contain.\n"
+            "- 'refuted' only when the record shows the test the criterion names properly completed "
+            "with a result that contradicts it. When a criterion lists tests needed to rule it out, "
+            "put in tests_completed the numbers of those tests this record shows completed with a "
+            "result that contradicts the criterion; the criterion counts as refuted only once every "
+            "listed test has been (they may be in different records), so still answer 'refuted' "
+            "when this record completes only some of them. A 'refuted' answer for such a criterion "
+            "never has an empty tests_completed: a refutation whose tests are not numbered is not "
+            "counted.\n"
+            "- 'not_applicable' only when the criterion itself names the drug, exposure, subtype, "
+            "sex, age group or situation it applies to, and the record shows this patient does not "
+            "match it — an HLA allele tied to flucloxacillin in a patient who never took it, a test "
+            "stated 'in cholestatic liver damage' in a patient whose record shows hepatocellular "
+            "injury (R > 5), a criterion stated 'when ALT is within the normal range' in a patient "
+            "with a raised ALT, a paediatric threshold in an adult. Quote the record text that shows "
+            "the patient does not match. A finding of the condition itself, a test that would "
+            "exclude another cause, and any criterion whose stated condition this patient does "
+            "match are never 'not_applicable': judge them supported, refuted or unconfirmed.\n"
+            "- A test, examination or treatment that has not been done yet is 'unconfirmed', never "
+            "'not_applicable': 'not_applicable' is for a criterion that cannot concern this patient, "
+            "not for one whose answer the record does not hold yet.\n"
+            "- direction_only: set it true when the criterion states a measurement only as raised, "
+            "lowered, increased, decreased, elevated, reduced, low, high or abnormal, with no number "
+            "or threshold. Such a criterion is 'unconfirmed' whatever the record shows: a direction "
+            "alone neither confirms it nor rules it out.\n"
+            "quote must be text copied from the record above, and only for supported, refuted or "
+            "not_applicable. Leave quote empty for unconfirmed. Never write a value the record does "
+            "not contain.\n"
             "Return exactly one entry per criterion number listed above."
         )
     except Exception:
@@ -505,6 +618,10 @@ def _recheck_refutations(
             "result that cannot be true at the same time as the criterion. Return holds=false if "
             "any of these apply:\n"
             "- the quote is about a different finding, test or pathogen than the criterion names;\n"
+            "- the record shows the finding the criterion names, only described with a different "
+            "qualifier (its distribution, extent or pattern);\n"
+            "- the quote is a negative result from a different site or specimen than the criterion "
+            "names, or than the criterion's finding could be shown in;\n"
             "- the test was not done, only planned or pending, contraindicated, or done in a "
             "different form than the criterion names;\n"
             "- a number or duration in the quote actually falls inside the criterion's threshold "
@@ -573,6 +690,9 @@ def verify_with_emr(state: dict) -> dict:
 
     pending = {c.text: c for c in criteria}
     settled: dict[str, AttributedVerification] = {}
+    # Refutations of a criterion whose refute_requires names several tests, gathered across records
+    # until every test is covered: {criterion: {"tests": {test numbers}, "quotes": [(quote, source)]}}
+    partial: dict[str, dict] = {}
     history: list[dict] = []
     texts: dict[str, str] = {}
     read: dict[str, list[str]] = {}
@@ -600,15 +720,25 @@ def verify_with_emr(state: dict) -> dict:
             )
             date, source = _doc_ref(doc_id)
             resolved = 0
-            traced: list[tuple[Criterion, str, str]] = []
+            traced: list[tuple[Criterion, str, str, list[int]]] = []
             for entry in judged.judgements if judged else []:
                 index = entry.criterion_number - 1
                 if not 0 <= index < len(group):
                     continue
                 criterion = group[index]
-                if criterion.text not in pending or entry.judgement == "unconfirmed":
+                if criterion.text not in pending or any(t[0].text == criterion.text for t in traced):
                     continue
-                if any(t[0].text == criterion.text for t in traced):
+                # A criterion giving only a direction (raised, reduced) and no number is unconfirmed
+                # whatever the record says, so it is settled as such and not looked for again.
+                if entry.direction_only:
+                    settled[criterion.text] = AttributedVerification(
+                        criterion=criterion.text, content="", judgement="unconfirmed", source=None,
+                        date=None, history=list(read.get(criterion.text, [])), flag="direction_only",
+                    )
+                    pending.pop(criterion.text)
+                    resolved += 1
+                    continue
+                if entry.judgement == "unconfirmed":
                     continue
                 quote = _clean_quote(entry.quote)
                 # The quote has to be in the one document the model was shown. Nothing else can
@@ -616,11 +746,11 @@ def verify_with_emr(state: dict) -> dict:
                 # failure this whole node exists to prevent.
                 if attribute_doc([(doc_id, doc_text)], quote) is None:
                     continue
-                traced.append((criterion, entry.judgement, quote))
+                traced.append((criterion, entry.judgement, quote, entry.tests_completed))
             # A refutation the second read does not confirm is withdrawn, and its criterion stays
             # pending so the next-ranked document can still settle it. If the second call fails the
             # first judgement stands, as it did before the re-check existed.
-            refuted = [(c, q) for c, j, q in traced if j == "refuted"]
+            refuted = [(c, q) for c, j, q, _ in traced if j == "refuted"]
             withdrawn: list[dict] = []
             if refuted:
                 holds = _recheck_refutations(ddx_item.diagnosis_name, doc_id, doc_text, refuted)
@@ -630,9 +760,24 @@ def verify_with_emr(state: dict) -> dict:
                         for i, (c, q) in enumerate(refuted) if i not in holds
                     ]
             dropped = {w["criterion"] for w in withdrawn}
-            for criterion, judgement, quote in traced:
+            for criterion, judgement, quote, tests in traced:
                 if judgement == "refuted" and criterion.text in dropped:
                     continue
+                # A refutation counts only once every test the criterion needs to be ruled out has
+                # been completed against it (an NCC lesion: MRI and CT); until then the criterion
+                # stays pending, and the next-ranked record may complete the set. With a single test
+                # the refutation itself is that test completed — its quote is traced to this record
+                # and survived the re-check — so it counts even when the model left the number out.
+                if judgement == "refuted" and criterion.refute_requires:
+                    need = set(range(1, len(criterion.refute_requires) + 1))
+                    if len(need) == 1:
+                        tests = [1]
+                    got = partial.setdefault(criterion.text, {"tests": set(), "quotes": []})
+                    got["tests"] |= {t for t in tests if t in need}
+                    got["quotes"].append((quote, source))
+                    if not need <= got["tests"]:
+                        continue
+                    quote = " / ".join(q for q, _ in got["quotes"])
                 settled[criterion.text] = AttributedVerification(
                     criterion=criterion.text,
                     content=quote,
@@ -661,20 +806,20 @@ def verify_with_emr(state: dict) -> dict:
                 **step_extra,
             })
 
-    verifications = [
-        settled.get(
-            c.text,
-            AttributedVerification(
-                criterion=c.text,
-                content="",
-                judgement="unconfirmed",
-                source=None,
-                date=None,
-                history=list(read.get(c.text, [])),
-            ),
+    def left_open(c: Criterion) -> AttributedVerification:
+        got = partial.get(c.text)
+        flag = None
+        if got:
+            done = [c.refute_requires[t - 1] for t in sorted(got["tests"])]
+            flag = (f"partial_refutation: {len(done)} of {len(c.refute_requires)} tests needed to rule it "
+                    f"out completed ({'; '.join(done) or 'none named'}); quotes: "
+                    + " / ".join(f"{q} ({src})" for q, src in got["quotes"]))
+        return AttributedVerification(
+            criterion=c.text, content="", judgement="unconfirmed", source=None, date=None,
+            history=list(read.get(c.text, [])), flag=flag,
         )
-        for c in criteria
-    ]
+
+    verifications = [settled.get(c.text) or left_open(c) for c in criteria]
     record = VerificationRecord(
         diagnosis_name=ddx_item.diagnosis_name, verifications=verifications, history=history
     )
@@ -767,6 +912,255 @@ def _verified(
     return {"verification_result": record, "verification_log": [entry], **extra}
 
 
+# The tiers of a rank_key (_threshold_key), highest first. A diagnosis with no criteria, or none the
+# record bore out, sits in TIER_NO_EVIDENCE, which _rank_final hands to the model to order.
+TIER_MET, TIER_APPROACHING, TIER_NO_EVIDENCE, TIER_UNREACHABLE = 3, 2, 1, 0
+# The certainty a rule's label or a score's cut-off label gives (criteria_extract writes the
+# source's own name for the grade or route). A label naming several grades ("Probable or confirmed
+# encephalitis") is met at the lowest of them; a label naming none ("Classification criterion",
+# Yamaguchi's one rule) is the diagnosis itself and counts as definite. A cut-off that rules the
+# diagnosis out ("excluded", "unlikely" — which "likely" alone would read as probable) grades 0.
+RULE_GRADES = [(0, re.compile(r"excluded|unlikely|\bnot\b|negative", re.I)),
+               (1, re.compile(r"possible|suspect|indeterminate|ambiguous|low[- ]confidence", re.I)),
+               (2, re.compile(r"probable|presumptive|likely", re.I)),
+               (3, re.compile(r"definite|definitive|confirmed|certain|high[- ]confidence", re.I))]
+# A rule the source states as a requirement shared by every route of its set ("at least one major
+# neuroimaging criterion is always required", criteria_extract) rather than as a route of its own:
+# it has to hold alongside whichever route is met.
+REQUIREMENT_RULE = re.compile(r"\b(always|required?|requires|must|entry|additional)\b|exclusion of other", re.I)
+
+
+def _rule_grade(label: str) -> int:
+    return next((g for g, pattern in RULE_GRADES if pattern.search(label or "")), 3)
+
+
+def _number(value) -> float | None:
+    try:
+        return float(str(value).replace("+", "").replace("−", "-").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _words(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", (text or "").lower()))
+
+
+def _threshold_key(rows: list[dict], counted: list[dict], rules: list[dict], scopes: dict,
+                   status: str) -> tuple[list[int], dict]:
+    """How far the record has carried a diagnosis toward its source's diagnostic threshold.
+
+    The threshold is the source's own: its combo and score rules where it gives them (Yamaguchi:
+    five of the eight criteria with two of the four major; RUCAM: 6 points for "probable"), else
+    the category rule — a sufficient criterion, or every applicable precondition and necessary
+    criterion. A rule reads its items by id, so the role the extraction gave an item does not move
+    it — on PT05 the same Yamaguchi text came back with fever and leukocytosis "specific" on 10-28
+    and "nonspecific" on 10-29, and the old rank_key, which counted by category, dropped adult-onset
+    Still's disease from 1st to 6th. Counting criteria met as a share of what a route requires, not
+    as a raw number, also stops a source that lists many criteria from outranking one that lists
+    few (PT05: Castleman disease's 26 above Still's 8).
+
+    Exclusion criteria are left out of the category threshold and its share (2026-10-30): an
+    exclusion the record has not settled is a workup still to do (build_workup_gap lists it), not
+    evidence against the diagnosis, and requiring them all ranked the thorough sources last — on
+    the 10-29 runs drug-induced liver injury (12 criteria supported, HEV and CMV serology not yet in
+    the record) fell below dermatitis carried by pruritus and an allergy history. A refuted
+    exclusion (another cause shown) still keeps the threshold from being met.
+
+    rank_key, compared highest first:
+    - TIER_MET: a sufficient criterion supported, or a route of grade probable or higher met, or,
+      where no rule applies, every applicable precondition and necessary criterion supported with
+      no exclusion refuted and at least one finding — a necessary, specific or sufficient
+      criterion, not a precondition alone — supported (PT06: drug-reaction syndrome met on "exposure
+      to a suspected drug", the one defining item its source gave) -> [3, the grade (3 definite, 2 probable), sufficient plus net specific
+      criteria, supported exclusions, net nonspecific]
+    - TIER_APPROACHING: something supported, not met, and still reachable -> [2, percent of the
+      nearest reachable route's requirement reached, its gate items counted with its groups (of the
+      precondition and necessary criteria, plus one place for the finding, where no rule applies),
+      the rest as above]. A route of grade possible that is met counts as
+      100 percent here, not as met (PT07: angiostrongylus meningoencephalitis, "Suspected" met,
+      ranked above a diagnosis 86 percent of the way to its definite route)
+    - TIER_NO_EVIDENCE: nothing supported, still reachable -> [1, 0, 0, 0, 0]
+    - TIER_UNREACHABLE: every route has more refuted than it can spare, and no sufficient
+      criterion is left open -> [0, percent as above, the rest as above]
+    A refutation on its own declines nothing here; it lowers the share and the net counts.
+
+    A score rule is read where its cut-offs grade the diagnosis and its points name items. Since
+    2026-10-30 each points band of a scored finding is an item of its own, judged against the
+    record like any other, and a finding scores the points of its supported band, else its
+    default (the source's "no information" points); a finding counted over exclusion items
+    (RUCAM's search for alternative causes) scores the highest band whose minimum counts of
+    supported items are met, else its default. Bands are alternatives, so their items stay out of
+    the specific and nonspecific counts: the bands a case does not fall in come back refuted. An
+    earlier extraction keyed points by the finding's one item, with the conditions as text; there a
+    supported item scores the condition worded most like it, and a points key that is not an item
+    is only added to the reach. The reach adds, for each finding still open, its best points over
+    what it scores now. A score still unsettled — below its
+    probable cut-off but within reach of it — is not a route at all (2026-10-30), so it neither
+    meets nor holds down the diagnosis: on a short record the category rule ranks it, on a long one
+    (a full admission, the course after the drug was stopped) the score does.
+    """
+    judgement = {r["item_id"]: r["judgement"] for r in rows if r["item_id"]}
+    text = {r["item_id"]: r["criterion"] for r in rows if r["item_id"]}
+    # Rules of a declined or inapplicable subtype are left out, as its criteria are from `counted`.
+    live = [r for r in rules if scopes.get(r.get("subtype") or "", "live") not in ("declined", "not_applicable")]
+    band_ids = {str(b.get("item")) for r in live if r.get("type") == "score"
+                for spec in (r.get("points") or {}).values() if isinstance(spec, dict)
+                for b in spec.get("bands") or [] if isinstance(b, dict) and b.get("item")}
+    findings = [r for r in counted if r["item_id"] not in band_ids]
+
+    def count(judged: str, *cats: str) -> int:
+        return sum(r["judgement"] == judged and r["category"] in cats for r in findings)
+
+    specific = (count("supported", "sufficient", "specific") - count("refuted", "specific"))
+    exclusions = count("supported", "exclusion")
+    nonspecific = count("supported", "nonspecific") - count("refuted", "nonspecific")
+
+    def evaluate(rule: dict) -> dict:
+        """Met, reachable, and the count supported and required over the rule's groups; an item
+        not_applicable to the patient counts neither way, one not in the record is unconfirmed."""
+        met, reachable, filled, needed = True, True, 0, 0
+        for group in rule.get("groups") or []:
+            items = [judgement.get(str(i), "unconfirmed") for i in group.get("items") or []]
+            m = max(int(_number(group.get("m")) or 1), 1)
+            got, open_ = items.count("supported"), items.count("unconfirmed")
+            met, reachable = met and got >= m, reachable and got + open_ >= m
+            filled, needed = filled + min(got, m), needed + m
+        # The gate is one more group, every applicable item of it required: the setting the criteria
+        # are for. Unchecked, PT03's hepatic veno-occlusive disease met the Seattle criteria, which are
+        # for after a stem-cell transplant, on bilirubin and hepatomegaly with no transplant on record.
+        gate = [j for j in (judgement.get(str(i), "unconfirmed") for i in rule.get("gate") or []) if j != "not_applicable"]
+        got, open_ = gate.count("supported"), gate.count("unconfirmed")
+        met, reachable = met and got == len(gate), reachable and got + open_ == len(gate)
+        return {"met": met, "reachable": reachable, "filled": filled + got, "needed": needed + len(gate)}
+
+    def scored(key: str, spec) -> tuple[float, float, bool] | None:
+        """A scored finding's points now and at best, and whether the record has any of its items."""
+        if isinstance(spec, dict):
+            default = _number(spec.get("default")) or 0.0
+            bands = [b for b in spec.get("bands") or [] if isinstance(b, dict) and _number(b.get("points")) is not None]
+            if isinstance(spec.get("count_of"), dict):
+                lists = {str(n): [str(i) for i in ids or []] for n, ids in spec["count_of"].items()}
+                got = {n: sum(judgement.get(i) == "supported" for i in ids) for n, ids in lists.items()}
+                can = {n: got[n] + sum(judgement.get(i, "unconfirmed") == "unconfirmed" for i in ids)
+                       for n, ids in lists.items()}
+
+                def band(counts: dict) -> float:
+                    reached = [_number(b["points"]) for b in bands if all(
+                        counts.get(str(n), 0) >= (_number(m) or 0) for n, m in (b.get("min") or {}).items())]
+                    return max(reached, default=default)
+                return band(got), band(can), any(i in judgement for ids in lists.values() for i in ids)
+            items = [(str(b.get("item")), _number(b["points"])) for b in bands]
+            held = [p for i, p in items if judgement.get(i) == "supported"]
+            now = max(held) if held else default
+            open_ = [p for i, p in items if judgement.get(i, "unconfirmed") == "unconfirmed"]
+            return now, (now if held else max([now] + open_)), any(i in judgement for i, _ in items)
+        if isinstance(spec, list):  # an extraction before 2026-10-30
+            bands = [(_number(c.get("points")), c.get("condition") or "") for c in spec
+                     if isinstance(c, dict) and _number(c.get("points")) is not None]
+            if not bands:
+                return None
+            state = judgement.get(key)
+            if state == "supported":
+                words = _words(text.get(key))
+                now = max(bands, key=lambda b: len(words & _words(b[1])) / max(len(_words(b[1]) | words), 1))[0]
+                return now, now, True
+            best = max(0.0, max(p for p, _ in bands)) if state in (None, "unconfirmed") else 0.0
+            return 0.0, best, state is not None
+        return None
+
+    def score(rule: dict) -> dict | None:
+        """The rule as a route — the grade of the highest cut-off reached, met when that is
+        probable or higher — or None when it cannot be read (no graded cut-off, no item named)."""
+        cutoffs = [(c.get("label"), _rule_grade(c.get("label")), _number(c.get("min")))
+                   for c in rule.get("cutoffs") or [] if isinstance(c, dict)]
+        cutoffs = [(label, g, low) for label, g, low in cutoffs if g >= 1 and low is not None]
+        parts = [p for p in (scored(str(k), v) for k, v in (rule.get("points") or {}).items()) if p]
+        if not cutoffs or not any(seen for _, _, seen in parts):
+            return None
+        total = sum(now for now, _, _ in parts)
+        reach = sum(max(best - now, 0.0) for now, best, _ in parts)
+        gate = [judgement.get(str(i), "unconfirmed") for i in rule.get("gate") or []]
+        reached = [(g, low) for _, g, low in cutoffs if total >= low]
+        target = min([low for _, g, low in cutoffs if g >= 2] or [min(low for _, _, low in cutoffs)])
+        # A score decides only once it is settled: reached with its gate held, or out of reach even
+        # with every open item at its highest points. In between it is left out and the category
+        # rule ranks the diagnosis — RUCAM's course after cessation (+3) cannot be in a record taken
+        # before the diagnosis is made, and on PT03 the 2 points it had then held drug-induced liver
+        # injury at 33 percent, 6th, under the diagnoses its own liver-injury definition outranks.
+        # A gate item not applicable to the patient does not hold the score back: RUCAM gates on the
+        # ALP being of hepatic origin, which a hepatocellular case with a normal ALP never settles.
+        gate_held = all(j in ("supported", "not_applicable") for j in gate)
+        if not (total >= target and gate_held) and total + reach >= target and "refuted" not in gate:
+            return None
+        grade = max([g for g, _ in reached] or [0])
+        return {"rule": rule.get("id"), "label": rule.get("label"), "set": rule.get("set") or "",
+                "grade": grade, "score": total,
+                "met": grade >= 1 and gate_held,
+                "reachable": total + reach >= target and "refuted" not in gate,
+                "share": min(max(total, 0.0) / target, 1.0) if target > 0 else 1.0}
+
+    combos = [r for r in live if r.get("type") == "combo" and r.get("groups")]
+    routes = [route for route in (score(r) for r in live if r.get("type") == "score") if route]
+    for name in dict.fromkeys(r.get("set") or "" for r in combos):
+        in_set = [r for r in combos if (r.get("set") or "") == name]
+        required = [r for r in in_set if REQUIREMENT_RULE.search(r.get("label") or "")]
+        for rule in [r for r in in_set if r not in required] or required:
+            parts = [evaluate(rule)] + [evaluate(r) for r in required if r is not rule]
+            routes.append({
+                "rule": rule.get("id"), "label": rule.get("label"), "set": name,
+                "grade": _rule_grade(rule.get("label")),
+                "met": all(p["met"] for p in parts), "reachable": all(p["reachable"] for p in parts),
+                "share": sum(p["filled"] for p in parts) / max(sum(p["needed"] for p in parts), 1),
+            })
+
+    sufficient_open = any(r["category"] == "sufficient" and r["judgement"] == "unconfirmed" for r in findings)
+    any_supported = any(r["judgement"] == "supported" for r in counted)
+    # The category rule's defining criteria: the whole condition's, plus those of the one live subtype
+    # nearest to holding — subtypes are alternatives, as in the status, which needs only one of them
+    # (PT06: the consensus's pure, induced and mixed immune-checkpoint pneumonitis, all three counted
+    # together, held it at 50 percent when one subtype is all a case can be).
+    def defining_of(scope: str) -> list[dict]:
+        return [r for r in counted if r["scope"] == scope and r["category"] in ("precondition", "necessary")
+                and r["judgement"] != "not_applicable"]
+
+    def held(group: list[dict]) -> float:
+        return sum(r["judgement"] == "supported" for r in group) / max(len(group), 1)
+
+    subtypes = [g for g in (defining_of(n) for n, st in scopes.items() if st not in ("declined", "not_applicable")) if g]
+    defining = defining_of("whole") + max(subtypes, key=held, default=[])
+    finding_held = bool(count("supported", "necessary", "specific", "sufficient"))
+    category_met = finding_held and (
+        all(r["judgement"] == "supported" for r in defining) and not count("refuted", "exclusion")
+        if defining else status == "supported")
+    met = [r for r in routes if r["met"] and r["grade"] >= 2]
+    if count("supported", "sufficient") or met or (not routes and category_met):
+        tier = TIER_MET
+        second = max([r["grade"] for r in met] or [3])
+    else:
+        if routes:
+            open_routes = [r for r in routes if r["reachable"] or r["met"]]
+            reachable = bool(open_routes) or sufficient_open
+            share = max(1.0 if r["met"] else r["share"] for r in (open_routes or routes))
+        elif defining:
+            # The finding the category rule also requires is one more place in the share, so a
+            # precondition alone is half the way, not all of it (PT03: methotrexate toxicity at 100
+            # percent on "exposure to methotrexate", above drug-induced liver injury at 80).
+            reachable = True
+            share = (sum(r["judgement"] == "supported" for r in defining) + finding_held) / (len(defining) + 1)
+        else:
+            judged = [r for r in counted if r["judgement"] != "not_applicable"]
+            reachable = True
+            share = sum(r["judgement"] == "supported" for r in judged) / max(len(judged), 1)
+        second = round(100 * share)
+        if not reachable:
+            tier = TIER_UNREACHABLE
+        elif any_supported:
+            tier = TIER_APPROACHING
+        else:
+            tier, second, specific, exclusions, nonspecific = TIER_NO_EVIDENCE, 0, 0, 0, 0
+    return [tier, second, specific, exclusions, nonspecific], {"routes": routes}
+
+
 def determine_status(state: dict) -> dict:
     """
     - a judgement counts only if its quote traces to a document the verifier actually read;
@@ -778,8 +1172,23 @@ def determine_status(state: dict) -> dict:
       nothing is the same defect pointing the other way, and it was the more common one: on the
       arsenic branch 26 of 167 judgements quoted the search tool's own scoring line rather than a
       record, three of them as "supported", on a branch that made no lookups at all
-    - status then follows from the judgements that survive: any refutation -> "declined",
-      all supported -> "supported", anything left unconfirmed -> "pending"
+    - status then follows from the judgements that survive, by each criterion's category
+      (criteria_literature.CATEGORIES) and scope (the whole condition or one subtype). Each subtype
+      is judged first on its own criteria: declined by a refuted precondition or necessary
+      criterion of its own, not concerning the patient when one of its preconditions or every
+      criterion of it the record settled is not_applicable, supported by its own sufficient criterion or all its applicable
+      core criteria, pending otherwise. Then the condition: a refuted precondition or necessary
+      criterion of the whole condition, or every subtype that concerns the patient declined where
+      the source gives two or more subtypes -> "declined"; otherwise a supported sufficient criterion (of the whole or a live subtype), or
+      every applicable precondition, necessary and exclusion criterion of the whole supported and,
+      where there are subtypes, one of them supported (with no subtypes, at least one such
+      criterion is needed) -> "supported"; anything else -> "pending". A refuted exclusion
+      criterion (another cause shown) declines nothing since 2026-10-27; it keeps the diagnosis
+      pending. A refuted sufficient criterion declines nothing — a
+      biopsy of an unaffected site, larvae not found, an MRI without a scolex are negative results
+      of tests that confirm but cannot exclude, and treating them as exclusions declined
+      neurocysticercosis on PT07, the correct answer. A refuted specific or nonspecific criterion
+      declines nothing either; it lowers the rank instead (rank_key below)
     - Module 1/2 evidence is kept and the EMR findings are appended to it, per schema_examples.md,
       whose merged example keeps the vignette quote and the PubMed term alongside the EMR one.
       Replacing the list erased the entire clinical picture of a diagnosis whose criteria all came
@@ -787,12 +1196,14 @@ def determine_status(state: dict) -> dict:
     - date and source_doc name the document the judgement was made against, which verify_with_emr
       recorded when it made it, so the evidence and the verification log cannot disagree
     - a diagnosis with no criteria found stays "pending" and keeps its Module 1/2 evidence
-    - the diagnosis's rank score is (summed weight of its supported criteria) x ln(number of
-      supported criteria + 1), under the same traceability rule as the status; aggregate ranks the
-      final list by it. The first factor is how much of the diagnosis the record bears out — the
-      weighted form of supported/total, the weights summing to 1. The second keeps a diagnosis that
-      one or two findings carry from outranking one that many independent findings carry: a
-      diagnosis with four generic criteria otherwise reached 0.75 on three of them
+    - the diagnosis's rank_key, under the same traceability rule as the status, is how far the
+      record has carried it toward its source's diagnostic threshold (_threshold_key); aggregate
+      ranks the final list by it. It replaced (2026-10-30) a key counting supported criteria by
+      category — sufficient, net specific, necessary and exclusion, net nonspecific — under which
+      one supported criterion of any kind put a diagnosis above every one the record had not borne
+      out, and a source listing many criteria above one listing few; that key had replaced a score
+      summing per-criterion weights, which ranked a diagnosis carried by one generic finding above
+      one the record had not yet been tested for
     - returns {"refined_ddx": [DDxItem], "scores": [dict]}
     """
     ddx_item: DDxItem = state["ddx_item"]
@@ -802,13 +1213,64 @@ def determine_status(state: dict) -> dict:
         _write_branch(
             state["verify_run_dir"], ddx_item.diagnosis_name, {"refined": carried.model_dump()}
         )
-        score = {"diagnosis_name": ddx_item.diagnosis_name, "has_criteria": False, "score": 0.0,
-                 "supported": []}
+        score = {"diagnosis_name": ddx_item.diagnosis_name, "has_criteria": False,
+                 "rank_key": [TIER_NO_EVIDENCE, 0, 0, 0, 0], "supported": [], "refuted": []}
         return {"refined_ddx": [carried], "scores": [score]}
 
     # An untraceable judgement is demoted to unconfirmed, so status and evidence cannot disagree: a
     # diagnosis can no longer come back "supported" off judgements that quote no record.
     judgements = [v.judgement if v.source else "unconfirmed" for v in result.verifications]
+    by_text = {c.text: c for c in state.get("criteria") or []}
+    rows = [
+        {"criterion": v.criterion, "judgement": j,
+         "category": by_text[v.criterion].category if v.criterion in by_text else "necessary",
+         "scope": by_text[v.criterion].scope if v.criterion in by_text else "whole",
+         "item_id": by_text[v.criterion].item_id if v.criterion in by_text else ""}
+        for v, j in zip(result.verifications, judgements)
+    ]
+
+    def core_ok(group: list[dict]) -> bool | None:
+        """Whether every precondition, necessary and exclusion criterion of the group that applies
+        is supported; None when the group has none."""
+        core = [r for r in group if r["category"] in CORE_CATEGORIES and r["judgement"] != "not_applicable"]
+        return all(r["judgement"] == "supported" for r in core) if core else None
+
+    def has(group: list[dict], judgement: str, *cats: str) -> bool:
+        return any(r["judgement"] == judgement and r["category"] in cats for r in group)
+
+    # Each subtype is judged on its own (2026-10-27): a subtype is declined when one of its own
+    # preconditions or necessary criteria is refuted, does not concern the patient when one of its
+    # preconditions or every criterion of it the record settled is not_applicable, and is supported by its own sufficient
+    # criterion or by all its applicable core criteria. A declined subtype rules out that subtype
+    # only, never the condition: hepatocellular drug-induced liver injury is not declined because
+    # the record refutes the pattern that defines cholestatic injury.
+    scopes: dict[str, str] = {}
+    for name in dict.fromkeys(r["scope"] for r in rows if r["scope"] != "whole"):
+        group = [r for r in rows if r["scope"] == name]
+        judged = [r["judgement"] for r in group if r["judgement"] != "unconfirmed"]
+        if has(group, "refuted", *DECLINING_CATEGORIES):
+            scopes[name] = "declined"
+        # The precondition of a subtype is what decides that a case is that subtype (the pattern of
+        # cholestatic injury), so when it does not apply the subtype does not either, whatever its
+        # other criteria came back as.
+        elif has(group, "not_applicable", "precondition") or (judged and all(j == "not_applicable" for j in judged)):
+            scopes[name] = "not_applicable"
+        elif has(group, "supported", "sufficient") or core_ok(group):
+            scopes[name] = "supported"
+        else:
+            scopes[name] = "pending"
+    live = [name for name, st in scopes.items() if st != "not_applicable"]
+    whole = [r for r in rows if r["scope"] == "whole"]
+    # What counts toward the status and the rank: the whole condition's criteria and those of the
+    # subtypes still open; a declined or inapplicable subtype's criteria are left out.
+    counted = [r for r in rows if scopes.get(r["scope"]) not in ("declined", "not_applicable")]
+    entry = lambda r: {"criterion": r["criterion"], "category": r["category"], "scope": r["scope"]}
+    supported = [entry(r) for r in counted if r["judgement"] == "supported"]
+    refuted = [entry(r) for r in counted if r["judgement"] == "refuted"]
+    not_applicable = [entry(r) for r in rows if r["judgement"] == "not_applicable"]
+
+    def count(group: list[dict], *cats: str) -> int:
+        return sum(s["category"] in cats for s in group)
 
     evidence, seen = [], set()
     for v in result.verifications:
@@ -827,9 +1289,18 @@ def determine_status(state: dict) -> dict:
                 criterion=v.criterion,
             )
         )
-    if any(not e.supports for e in evidence):
+    whole_ok = core_ok(whole)
+    # Declining every live subtype declines the condition only where the source split it into two or
+    # more: a lone "subtype" does not cover the condition (PT07: "headache attributed to PRES",
+    # ICHD-3's secondary-headache criteria, extracted as PRES's only subtype, declined PRES itself).
+    if has(whole, "refuted", *DECLINING_CATEGORIES) or (
+        len(scopes) > 1 and live and all(scopes[n] == "declined" for n in live)
+    ):
         status = "declined"
-    elif all(j == "supported" for j in judgements):
+    elif count(supported, "sufficient") or (
+        whole_ok is not False
+        and (any(scopes[n] == "supported" for n in live) if live else whole_ok is True)
+    ):
         status = "supported"
     else:
         status = "pending"  # some criterion is still unconfirmed
@@ -837,18 +1308,12 @@ def determine_status(state: dict) -> dict:
     refined = ddx_item.model_copy(
         deep=True, update={"status": status, "evidence": list(ddx_item.evidence) + evidence}
     )
-    weights = {c.text: c.weight for c in state.get("criteria") or []}
-    supported = [
-        {"criterion": v.criterion, "weight": weights.get(v.criterion, 0.0)}
-        for v in result.verifications
-        if v.judgement == "supported" and v.source
-    ]
-    weight_sum = sum(s["weight"] for s in supported)
+    rank_key, threshold = _threshold_key(rows, counted, state.get("rules") or [], scopes, status)
     score = {
         "diagnosis_name": ddx_item.diagnosis_name, "has_criteria": True,
-        "score": round(weight_sum * math.log(len(supported) + 1), 4),
-        "supported_weight": round(weight_sum, 4), "supported_count": len(supported),
-        "criteria_count": len(result.verifications), "supported": supported,
+        "rank_key": rank_key, "threshold": threshold,
+        "criteria_count": len(result.verifications), "supported": supported, "refuted": refuted,
+        "not_applicable": not_applicable, "subtypes": scopes,
     }
     _write_branch(
         state["verify_run_dir"], ddx_item.diagnosis_name,
@@ -869,7 +1334,10 @@ def build_workup_gap(state: dict) -> dict:
     """
     ddx_item: DDxItem = state["ddx_item"]
     result: VerificationRecord = state["verification_result"]
-    unconfirmed = [v.criterion for v in result.verifications if v.judgement == "unconfirmed"]
+    # A direction-only criterion (no number) is unconfirmed by rule, so no test would settle it; a
+    # not_applicable one does not concern this patient. Neither is a gap.
+    unconfirmed = [v.criterion for v in result.verifications
+                   if v.judgement == "unconfirmed" and v.flag != "direction_only"]
     if not unconfirmed:
         return {"workup_gaps": []}
 
@@ -1061,21 +1529,29 @@ class LikelihoodOrder(BaseModel):
 
 
 def _rank_final(state: Module3State, remaining: list[DDxItem]) -> tuple[list[DDxItem], list[dict]]:
-    """Order the final list: first by score, then the rest as an LLM ranks them from the vignette.
+    """Order the final list by rank_key's tier, the no-evidence tier as an LLM ranks it from the vignette.
 
-    A diagnosis's score is the summed weight of its criteria the EMR supported times
-    ln(supported count + 1) (determine_status), so it measures how much of the diagnosis the record
-    already bears out and on how many findings, and those with any score come first, highest first. The rest — no criteria found, or none supported yet — cannot be told
-    apart that way, so the model is given the patient's clinical vignette and asked to order them by
-    how likely each is; they follow the scored ones. Its answer is a list of numbers checked against
-    the list, and anything it leaves out or repeats keeps its merged order at the end, so a failed
-    call loses no diagnosis. Ties in score keep the merged order, which puts diagnoses both modules
-    named first.
+    A diagnosis's rank_key (_threshold_key) places it in a tier by how far the EMR has carried it
+    toward its source's diagnostic threshold — met, approaching, no evidence, unreachable — and
+    orders it within the tier by the rest of the key, highest first. The criteria decide every
+    tier but one: a diagnosis with no criteria, or none the record bore out, cannot be told apart
+    from another such by them, so the model is given the patient's clinical vignette and asked to
+    order that tier by how likely each is. It sits below the approaching tier and above the
+    unreachable one, whose criteria the record has refuted beyond what its rules can spare. The
+    model's answer is a list of numbers checked against the list, and anything it leaves out or
+    repeats keeps its merged order at the end, so a failed call loses no diagnosis. Ties keep the
+    merged order, which puts diagnoses both modules named first.
     """
     scores = {s["diagnosis_name"]: s for s in state.get("scores") or []}
-    scored = [i for i in remaining if scores.get(i.diagnosis_name, {}).get("score", 0) > 0]
-    scored.sort(key=lambda i: -scores[i.diagnosis_name]["score"])
-    unscored = [i for i in remaining if i not in scored]
+
+    def key(item: DDxItem) -> list[int]:
+        return scores.get(item.diagnosis_name, {}).get("rank_key", [TIER_NO_EVIDENCE, 0, 0, 0, 0])
+
+    scored = [i for i in remaining if key(i)[0] > TIER_NO_EVIDENCE]
+    scored.sort(key=lambda i: [-k for k in key(i)])
+    unreachable = [i for i in remaining if key(i)[0] < TIER_NO_EVIDENCE]
+    unreachable.sort(key=lambda i: [-k for k in key(i)])
+    unscored = [i for i in remaining if key(i)[0] == TIER_NO_EVIDENCE]
 
     order, error = list(range(len(unscored))), None
     vignette_path = VIGNETTE_DIR / f"{state['patient_id']}_ddx_vignette_v1.md"
@@ -1094,17 +1570,17 @@ def _rank_final(state: Module3State, remaining: list[DDxItem]) -> tuple[list[DDx
         except Exception as e:
             error = str(e)
 
-    ranked = scored + [unscored[n] for n in order]
+    ranked = scored + [unscored[n] for n in order] + unreachable
     records = []
     for rank, item in enumerate(ranked, 1):
         s = scores.get(item.diagnosis_name, {})
         records.append({
             "rank": rank, "diagnosis_name": item.diagnosis_name, "status": item.status,
-            "method": "score" if item in scored else "llm",
-            "score": s.get("score", 0.0), "has_criteria": s.get("has_criteria", False),
-            "supported_weight": s.get("supported_weight", 0.0),
-            "supported_count": s.get("supported_count", 0), "criteria_count": s.get("criteria_count", 0),
-            "supported": s.get("supported", []),
+            "method": "llm" if item in unscored else "criteria",
+            "rank_key": key(item), "threshold": s.get("threshold"),
+            "has_criteria": s.get("has_criteria", False),
+            "criteria_count": s.get("criteria_count", 0),
+            "supported": s.get("supported", []), "refuted": s.get("refuted", []),
         })
     if error:
         records.append({"llm_ranking_error": error})
@@ -1123,8 +1599,8 @@ def aggregate(state: Module3State) -> dict:
     node wrote their file already.
 
     03_final_ddx_list.json is written in rank order (see _rank_final), and 08_ranking.json records
-    each diagnosis's rank, score, the supported criteria the score sums and whether the rank came
-    from the score or from the model.
+    each diagnosis's rank, rank_key, the supported and refuted criteria it counts and whether the
+    rank came from the criteria or from the model.
     """
     run_dir = Path(state["run_dir"])
     refined = state.get("refined_ddx") or []
